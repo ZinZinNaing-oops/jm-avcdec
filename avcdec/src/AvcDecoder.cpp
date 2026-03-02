@@ -1,13 +1,14 @@
-#include "AvcDecoder.h"
-extern "C" {
-#include "../../jm_wrapper.h"
-}
 #include <stdio.h>
 #include <cstdlib>
 #include <fstream>
 #include <vector>
 #include <iterator>
 #include <iostream>
+
+#include "AvcDecoder.h"
+extern "C" {
+#include "../../jm_wrapper.h"
+}
 
 AvcDecoder::AvcDecoder()
 {
@@ -95,52 +96,6 @@ unsigned int AvcDecoder::vdec_put_bs(
     return length;
 }
 
-void AvcDecoder::vdec_decode()
-{
-    while (true)
-    {
-        int ret = jm_decode_one_frame();
-
-        if (ret == 0)
-        {
-            // frame ready
-            int width  = jm_get_width();
-            int height = jm_get_height();
-
-            unsigned char* y = jm_get_y();
-            unsigned char* u = jm_get_u();
-            unsigned char* v = jm_get_v();
-
-            if (!y || !u || !v)
-                continue;
-
-            int ySize  = width * height;
-            int uvSize = ySize / 4;
-
-            Frame frame;
-            frame.width  = width;
-            frame.height = height;
-            frame.yuv.resize(ySize + 2 * uvSize);
-
-            memcpy(frame.yuv.data(), y, ySize);
-            memcpy(frame.yuv.data() + ySize, u, uvSize);
-            memcpy(frame.yuv.data() + ySize + uvSize, v, uvSize);
-
-            m_frameQueue.push(std::move(frame));
-
-            continue;
-        }
-
-        if (ret == 1)
-        {
-            // EOF reached — but continue to flush DPB
-            continue;
-        }
-
-        break; // no more frames
-    }
-}
-
 void AvcDecoder::decodeAvailable()
 {
     if (m_streamSize == 0 || m_finished)
@@ -188,27 +143,26 @@ void AvcDecoder::decodeAvailable()
         m_frameQueue.push(std::move(frame));
 
         jm_consume_output();
-        // 🔥 Remove data actually consumed by JM
-if (g_memory_pos > 0)
-{
-    memmove(m_streamBuffer,
-            m_streamBuffer + g_memory_pos,
-            m_streamSize - g_memory_pos);
 
-    m_streamSize -= g_memory_pos;
+        // Remove data actually consumed by JM
+        if (g_memory_pos > 0)
+        {
+            memmove(m_streamBuffer,
+                    m_streamBuffer + g_memory_pos,
+                    m_streamSize - g_memory_pos);
 
-    g_memory_pos = 0;
+            m_streamSize -= g_memory_pos;
 
-    g_memory_buffer = m_streamBuffer;
-    g_memory_size   = m_streamSize;
+            g_memory_pos = 0;
 
-    // You MUST rescan start codes now
-    m_startCodePositions.clear();
-    scanNewStartCodes(0);
-}
-        
+            g_memory_buffer = m_streamBuffer;
+            g_memory_size   = m_streamSize;
+
+            // You MUST rescan start codes now
+            m_startCodePositions.clear();
+            scanNewStartCodes(0);
+        }      
     }
-
 }
 
 void AvcDecoder::vdec_stop()
@@ -256,88 +210,6 @@ void AvcDecoder::scanNewStartCodes(size_t oldSize)
 bool AvcDecoder::hasFullNAL()
 {
     return m_startCodePositions.size() >= 2;
-}
-/*----------------------------------------
-  Open bitstream from file (load into memory)
-----------------------------------------*/
-bool AvcDecoder::open(const char* filename)
-{
-    // Load file into memory buffer
-    std::ifstream file(filename, std::ios::binary);
-    if (!file)
-    {
-        std::cerr << "Failed to open file: " << filename << std::endl;
-        return false;
-    }
-
-    m_buffer.assign(
-        std::istreambuf_iterator<char>(file),
-        std::istreambuf_iterator<char>());
-
-    if (m_buffer.empty())
-    {
-        std::cerr << "File is empty." << std::endl;
-        return false;
-    }
-
-    // Start JM decoder in memory mode
-    if (jm_start_from_memory(
-            reinterpret_cast<unsigned char*>(m_buffer.data()),
-            static_cast<int>(m_buffer.size())) != 0)
-    {
-        std::cerr << "JM decoder failed to start." << std::endl;
-        return false;
-    }
-
-    return true;
-}
-
-void AvcDecoder::decodeInternal()
-{
-    while (true)
-    {
-        int ret = jm_decode_one_frame();
-
-        if (ret == 1)  // end of stream
-            break;
-
-        if (ret != 0)
-            break;
-
-        int width = jm_get_width();
-        int height = jm_get_height();
-
-        unsigned char* y = jm_get_y();
-        unsigned char* u = jm_get_u();
-        unsigned char* v = jm_get_v();
-
-        if (!y || !u || !v)
-            break;
-
-        int ySize = width * height;
-        int uvSize = ySize / 4;
-
-        Frame frame;
-        frame.width = width;
-        frame.height = height;
-        frame.yuv.resize(ySize + uvSize * 2);
-
-        memcpy(frame.yuv.data(), y, ySize);
-        memcpy(frame.yuv.data() + ySize, u, uvSize);
-        memcpy(frame.yuv.data() + ySize + uvSize, v, uvSize);
-
-        m_frameQueue.push(std::move(frame));
-    }
-}
-
-uint8_t* AvcDecoder::vdec_get_picture()
-{
-    if (m_frameQueue.empty())
-        return nullptr;
-
-    Frame& frame = m_frameQueue.front();
-
-    return frame.yuv.data();
 }
 
 /*----------------------------------------
@@ -411,10 +283,80 @@ bool AvcDecoder::decode_one_frame(
     return true;
 }
 
-/*----------------------------------------
-  Close decoder
-----------------------------------------*/
-void AvcDecoder::close()
-{
-    jm_stop();
-}
+NALUParser :: NALUParser() : current_pos(0) {}
+
+// Feed data into the buffer
+void NALUParser:: feed_data(const uint8_t* data, size_t length) {
+        buffer.insert(buffer.end(), data, data + length);
+    }
+    
+    // Find and extract next complete NALU
+    bool NALUParser::get_next_nalu(std::vector<uint8_t>& nalu) {
+        nalu.clear();
+        
+        if (current_pos >= buffer.size()) {
+            return false;
+        }
+        
+        // Find start code (00 00 00 01 or 00 00 01)
+        size_t start_pos = find_start_code(current_pos);
+        if (start_pos == std::string::npos) {
+            return false;
+        }
+        
+        // Skip start code
+        size_t nalu_start = start_pos;
+        if (buffer[start_pos] == 0 && buffer[start_pos+1] == 0 && 
+            buffer[start_pos+2] == 0 && buffer[start_pos+3] == 1) {
+            nalu_start = start_pos + 4;  // Skip 00 00 00 01
+        } else if (buffer[start_pos] == 0 && buffer[start_pos+1] == 0 && 
+                   buffer[start_pos+2] == 1) {
+            nalu_start = start_pos + 3;  // Skip 00 00 01
+        }
+        
+        // Find next start code
+        size_t next_start = find_start_code(nalu_start);
+        if (next_start == std::string::npos) {
+            // No more NALUs, might be incomplete
+            return false;
+        }
+        
+        // Extract NALU data (without start code)
+        nalu.assign(buffer.begin() + nalu_start, buffer.begin() + next_start);
+        current_pos = next_start;
+        
+        return !nalu.empty();
+    }
+    
+    // Check if we have a complete NALU
+    bool NALUParser::has_complete_nalu() {
+        size_t start_pos = find_start_code(current_pos);
+        if (start_pos == std::string::npos) {
+            return false;
+        }
+        
+        size_t nalu_start = (buffer[start_pos+3] == 1) ? start_pos + 4 : start_pos + 3;
+        size_t next_start = find_start_code(nalu_start);
+        
+        return next_start != std::string::npos;
+    }
+size_t NALUParser:: find_start_code(size_t from_pos) {
+        for (size_t i = from_pos; i + 3 < buffer.size(); i++) {
+            // Check for 00 00 00 01
+            if (buffer[i] == 0 && buffer[i+1] == 0 && 
+                buffer[i+2] == 0 && buffer[i+3] == 1) {
+                return i;
+            }
+            // Check for 00 00 01
+            if (i + 2 < buffer.size() && 
+                buffer[i] == 0 && buffer[i+1] == 0 && buffer[i+2] == 1) {
+                return i;
+            }
+        }
+        return std::string::npos;
+    }
+
+void NALUParser::NALUParserClear() {
+        buffer.clear();
+        current_pos = 0;
+    }

@@ -103,14 +103,11 @@ class AvcDecoder
             uint16_t err_flag,
             uint32_t err_sn_skip
         );
-        void vdec_decode();
+ 
         void decodeAvailable();
-
-        uint8_t* vdec_get_picture();
 
         uint8_t* vdec_get_picture(int* width, int* height);
 
-        bool open(const char* filename);
         bool decode_one_frame(
             uint8_t** y,
             uint8_t** u,
@@ -118,11 +115,28 @@ class AvcDecoder
             int* width,
             int* height
         );
-        void close();
 
     private:
-        void decodeInternal();
         void scanNewStartCodes(size_t oldSize);
-        bool hasFullNAL();
-        
+        bool hasFullNAL();      
+};
+
+class NALUParser
+{
+    public:
+        std::vector<uint8_t> buffer;
+        size_t current_pos;
+
+    public:
+        NALUParser();
+
+        // Feed data into the buffer
+        void feed_data(const uint8_t* data, size_t length);
+        // Find and extract next complete NALU
+        bool get_next_nalu(std::vector<uint8_t>& nalu);
+        // Check if we have a complete NALU
+        bool has_complete_nalu();
+        void NALUParserClear();
+        size_t find_start_code(size_t from_pos);
+
 };
