@@ -1,0 +1,26 @@
+# Build
+build/
+*/build/
+CMakeFiles/
+CMakeCache.txt
+Makefile
+
+# Binaries
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+
+# Video test files
+*.yuv
+*.dec
+
+# Logs
+*.log
+
+# VSCode
+.vscode/
+
+# macOS
+.DS_Store
