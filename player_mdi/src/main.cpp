@@ -9,75 +9,82 @@ extern "C" {
 
 int main(int argc, char* argv[])
 {
+    // Create decoder instance
     AvcDecoder decoder;
 
+    // Start decoder
     if (!decoder.vdec_start(0, 0))
+    {
+        fprintf(stderr, "Failed to start decoder\n");
         return -1;
+    }
 
-    std::ifstream file("/Users/zinnaing/projects/avc_project/errnal_002.264", std::ios::binary);
-    
-    if (!file) {
+    // Open H.264 file
+    std::ifstream file("/Users/zinnaing/projects/avc_project/AUD_MW_E.264", std::ios::binary);
+    //std::ifstream file(input_file, std::ios::binary);
+    if (!file)
+    {
         fprintf(stderr, "Cannot open file:");
         return -1;
     }
 
-    NALUParser parser;
-    std::vector<uint8_t> chunk(4096);
-    std::vector<uint8_t> nalu;
-    uint32_t nalu_count = 0;
-    
     printf("=== DECODER STARTED ===\n");
     printf("Processing file: ");
-// Read entire file into memory
-    while (file) {
+
+    std::vector<uint8_t> chunk(4096);
+    uint32_t nalu_count = 0;
+    uint32_t frame_count = 0;
+
+    // Read entire file in chunks and feed to decoder
+    while (file)
+    {
         file.read(reinterpret_cast<char*>(chunk.data()), chunk.size());
         std::streamsize bytesRead = file.gcount();
 
         if (bytesRead <= 0)
             break;
 
-        // Feed chunk to NALU parser
-        parser.feed_data(chunk.data(), bytesRead);
+        // Feed chunk to decoder (no intermediate NALU parsing needed)
+        // The decoder now handles NALU extraction internally
+        decoder.vdec_put_bs(
+            chunk.data(),
+            static_cast<uint32_t>(bytesRead),
+            0,          // end_of_au = 0 (not end of AU yet)
+            nalu_count, // pts
+            0,          // err_flag
+            0           // err_sn_skip
+        );
 
-        // Extract and decode complete NALUs
-        while (parser.has_complete_nalu() && parser.get_next_nalu(nalu)) {
-            nalu_count++;
-            
-            printf("NALU #%u: size=%zu bytes\n", nalu_count, nalu.size());
-            
-            // Send complete NALU to decoder
-            // Use end_of_au=1 only for last NALU
-            uint16_t end_of_au = 0;  // Or set to 1 if you know it's the last NALU
-            
-            decoder.vdec_put_bs(
-                nalu.data(), 
-                nalu.size(), 
-                end_of_au,  // end_of_au
-                nalu_count, // pts (use NALU count as frame counter)
-                0,          // err_flag
-                0           // err_sn_skip
-            );
-
-            // Get decoded pictures
-            int w, h;
-            while (uint8_t* frame = decoder.vdec_get_picture(&w, &h)) {
-                printf("Frame decoded: %dx%d\n", w, h);
-            }
+        // Get decoded frames
+        int width, height;
+        uint8_t* frame_data = nullptr;
+        while ((frame_data = decoder.vdec_get_picture(&width, &height)) != nullptr)
+        {
+            frame_count++;
+            printf("Frame #%u decoded: %dx%d\n", frame_count, width, height);
         }
     }
 
-    // Signal end of stream (optional)
-    printf("=== DECODER STOPPING ===\n");
-    decoder.vdec_put_bs(nullptr, 0, 1, 0, 0, 0);  // Flush remaining frames
-    
+    file.close();
+
+    // Signal end of stream with end_of_au = 1
+    printf("\n=== SIGNALING END OF STREAM ===\n");
+    decoder.vdec_put_bs(nullptr, 0, 1, nalu_count, 0, 0);
+
     // Get remaining frames
-    int w, h;
-    while (uint8_t* frame = decoder.vdec_get_picture(&w, &h)) {
-        printf("Final frame decoded: %dx%d\n", w, h);
+    int width, height;
+    uint8_t* frame_data = nullptr;
+    while ((frame_data = decoder.vdec_get_picture(&width, &height)) != nullptr)
+    {
+        frame_count++;
+        printf("Final frame #%u decoded: %dx%d\n", frame_count, width, height);
     }
 
+    // Stop decoder
+    printf("\n=== DECODER STOPPING ===\n");
     decoder.vdec_stop();
     printf("=== DECODER STOPPED ===\n");
-    
+    printf("Total frames decoded: %u\n", frame_count);
+
     return 0;
 }

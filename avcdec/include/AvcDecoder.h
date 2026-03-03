@@ -13,7 +13,7 @@ typedef unsigned char   Bool;
 typedef unsigned char   UInt8;
 typedef unsigned short  UInt16;
 typedef unsigned long   UInt32;
-//typedef char            Boolean;
+typedef char            Boolean;
 typedef char            SInt_8;
 typedef short           SInt16;
 typedef long            SInt32;
@@ -66,11 +66,13 @@ typedef struct {
 class AvcDecoder
 {
     private:
+        // Frame storage
         std::vector<uint8_t> m_buffer;
         std::vector<uint8_t> m_y;
         std::vector<uint8_t> m_u;
         std::vector<uint8_t> m_v; 
         
+        // Stream buffer for JM
         uint8_t* m_streamBuffer;
         size_t   m_streamCapacity;
         size_t   m_streamSize;
@@ -81,20 +83,19 @@ class AvcDecoder
             int width;
             int height;
         };
-
         std::queue<Frame> m_frameQueue;
+
         bool m_started;
         bool m_finished = false;
-        // NEW: NAL tracking
-        std::vector<size_t> m_startCodePositions;
+        
+        std::vector<uint8_t> m_nalu_buffer;
+        size_t m_nalu_current_pos;
 
     public:
         AvcDecoder();
         ~AvcDecoder();
-
         bool vdec_start(UInt16 PLAY_MODE, UInt16 POST_PROCESS);
         void vdec_stop();
-
         unsigned int vdec_put_bs(
             uint8_t* payload,
             uint32_t length,
@@ -103,40 +104,15 @@ class AvcDecoder
             uint16_t err_flag,
             uint32_t err_sn_skip
         );
- 
         void decodeAvailable();
-
         uint8_t* vdec_get_picture(int* width, int* height);
 
-        bool decode_one_frame(
-            uint8_t** y,
-            uint8_t** u,
-            uint8_t** v,
-            int* width,
-            int* height
-        );
-
     private:
-        void scanNewStartCodes(size_t oldSize);
-        bool hasFullNAL();      
-};
-
-class NALUParser
-{
-    public:
-        std::vector<uint8_t> buffer;
-        size_t current_pos;
-
-    public:
-        NALUParser();
-
-        // Feed data into the buffer
-        void feed_data(const uint8_t* data, size_t length);
-        // Find and extract next complete NALU
-        bool get_next_nalu(std::vector<uint8_t>& nalu);
-        // Check if we have a complete NALU
-        bool has_complete_nalu();
-        void NALUParserClear();
-        size_t find_start_code(size_t from_pos);
-
+        // NALU parsing methods
+        void feedNALUData(const uint8_t* data, size_t length);
+        bool getNextNALU(std::vector<uint8_t>& nalu);
+        bool hasCompleteNALU();
+        size_t findStartCode(size_t from_pos);
+        void clearNALUBuffer();
+              
 };
