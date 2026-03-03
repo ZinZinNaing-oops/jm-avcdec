@@ -3,39 +3,39 @@
 #include <iostream>
 #include <fstream>
 #include <vector>
-extern "C" {
-#include "../../JM/jm_wrapper.h"
-}
 
 int main(int argc, char* argv[])
 {
-    // Create decoder instance
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s <h264_file>\n", argv[0]);
+        return -1;
+    }
+
+    const char* input_file = argv[1];
+
     AvcDecoder decoder;
 
-    // Start decoder
     if (!decoder.vdec_start(0, 0))
     {
         fprintf(stderr, "Failed to start decoder\n");
         return -1;
     }
 
-    // Open H.264 file
-    std::ifstream file("/Users/zinnaing/projects/avc_project/AUD_MW_E.264", std::ios::binary);
-    //std::ifstream file(input_file, std::ios::binary);
+    std::ifstream file(input_file, std::ios::binary);
     if (!file)
     {
-        fprintf(stderr, "Cannot open file:");
+        fprintf(stderr, "Cannot open file: %s\n", input_file);
         return -1;
     }
 
-    printf("=== DECODER STARTED ===\n");
-    printf("Processing file: ");
+    printf("=== FILE DECODING STARTED ===\n");
+    printf("Input: %s\n\n", input_file);
 
-    std::vector<uint8_t> chunk(4096);
-    uint32_t nalu_count = 0;
+    std::vector<uint8_t> chunk(65536);
     uint32_t frame_count = 0;
+    size_t total_bytes_read = 0;
 
-    // Read entire file in chunks and feed to decoder
+    // Feed file to decoder
     while (file)
     {
         file.read(reinterpret_cast<char*>(chunk.data()), chunk.size());
@@ -44,47 +44,63 @@ int main(int argc, char* argv[])
         if (bytesRead <= 0)
             break;
 
-        // Feed chunk to decoder (no intermediate NALU parsing needed)
-        // The decoder now handles NALU extraction internally
-        decoder.vdec_put_bs(
+        total_bytes_read += bytesRead;
+
+        int ret = decoder.vdec_put_bs(
             chunk.data(),
             static_cast<uint32_t>(bytesRead),
-            0,          // end_of_au = 0 (not end of AU yet)
-            nalu_count, // pts
-            0,          // err_flag
-            0           // err_sn_skip
+            0,
+            0,
+            0,
+            0
         );
 
-        // Get decoded frames
+        if (ret < 0)
+        {
+            fprintf(stderr, "Error in vdec_put_bs\n");
+            break;
+        }
+
+        // Try to get frames (won't get any until end)
         int width, height;
         uint8_t* frame_data = nullptr;
         while ((frame_data = decoder.vdec_get_picture(&width, &height)) != nullptr)
         {
             frame_count++;
-            printf("Frame #%u decoded: %dx%d\n", frame_count, width, height);
+            int size_kb = (width * height * 3 / 2) / 1024;
+            printf("  ✓ Frame #%u: %dx%d (%d KB)\n", frame_count, width, height, size_kb);
         }
     }
 
     file.close();
 
-    // Signal end of stream with end_of_au = 1
     printf("\n=== SIGNALING END OF STREAM ===\n");
-    decoder.vdec_put_bs(nullptr, 0, 1, nalu_count, 0, 0);
+    decoder.vdec_put_bs(nullptr, 0, 1, 0, 0, 0);
 
-    // Get remaining frames
+    // Retrieve frames from EOS flush
     int width, height;
     uint8_t* frame_data = nullptr;
     while ((frame_data = decoder.vdec_get_picture(&width, &height)) != nullptr)
     {
         frame_count++;
-        printf("Final frame #%u decoded: %dx%d\n", frame_count, width, height);
+        printf("  ✓ Frame #%u (EOS flush): %dx%d\n", frame_count, width, height);
     }
 
-    // Stop decoder
-    printf("\n=== DECODER STOPPING ===\n");
+    // CRITICAL: Stop decoder to flush DPB
     decoder.vdec_stop();
-    printf("=== DECODER STOPPED ===\n");
-    printf("Total frames decoded: %u\n", frame_count);
+
+    // CRITICAL: Get frames that were flushed during vdec_stop()
+    while ((frame_data = decoder.vdec_get_picture(&width, &height)) != nullptr)
+    {
+        frame_count++;
+        printf("  ✓ Frame #%u (DPB flushed): %dx%d\n", frame_count, width, height);
+    }
+
+    printf("\n========================================\n");
+    printf("✓ DECODE COMPLETE\n");
+    printf("  Frames decoded: %u\n", frame_count);
+    printf("  Total bytes:    %zu bytes (%.2f MB)\n", total_bytes_read, total_bytes_read / (1024.0 * 1024.0));
+    printf("========================================\n\n");
 
     return 0;
 }
