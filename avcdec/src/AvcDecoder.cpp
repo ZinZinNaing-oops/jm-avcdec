@@ -1,258 +1,580 @@
-#include <stdio.h>
-#include <cstdlib>
-#include <string.h>
-#include <iostream>
-#include <vector>
-
 #include "AvcDecoder.h"
+#include <cmath>
+#include <algorithm>
+#include <cstdlib>
+#include <cstdio>
+
+//============================================================================
+// JM External Functions and Variables
+//============================================================================
+
 extern "C" {
-#include "../../jm_wrapper.h"
+    // ========== INCLUDE CORE HEADERS ONLY ==========
+    #include "../../JM/ldecod/inc/global.h"
+    #include "../../JM/ldecod/inc/annexb.h"
+    
+    // ========== DO NOT INCLUDE ldecod.h OR ldecod.c ==========
+    
+    // ========== DECLARE EXTERNAL VARIABLES ==========
+    extern unsigned char* g_memory_buffer;
+    extern int g_memory_size;
+    extern int g_memory_pos;
+    
+    // ========== DECLARE EXTERNAL STRUCTURES ==========
+    extern DecoderParams *p_Dec;
+    extern DecodedPicList *pDecPicList;
+    extern Bitstream *currStream;
+    
+    // ========== DECLARE EXTERNAL FUNCTIONS ==========
+    // These are implemented in ldecod.c but we don't include it
+    extern int OpenDecoder(InputParameters *p_Inp);
+    extern int DecodeOneFrame(DecoderParams *pDecoder);
+    extern void FinitDecoder(DecodedPicList **pDecPicList);
+    extern int CloseDecoder(void);
+    extern void Configure(InputParameters *p_Inp, int ac, char *av[]);
 }
 
-AvcDecoder::AvcDecoder() : m_last_memory_pos(0), m_eos_signaled(false)
+//============================================================================
+// Constants (from ldecod.c)
+//============================================================================
+
+#define DEC_OPEN_NOERR  0
+#define DEC_OPEN_ERRMASK 1
+#define DEC_SUCCEED 0
+#define DEC_EOS 1
+
+//============================================================================
+// Constructor (Section 5.2.1)
+//============================================================================
+
+Avcdec::Avcdec(DECPARAM_AVC *INPUT_PARAM)
+    : m_streamBuffer(nullptr),
+      m_streamCapacity(0),
+      m_streamSize(0),
+      m_started(false),
+      m_finished(false),
+      m_postprocess_enabled(false),
+      m_threadRunning(false),
+      m_framesDecoded(0),
+      m_picturesOutput(0)
 {
-    m_streamCapacity = 100 * 1024 * 1024;
-    m_streamBuffer = new uint8_t[m_streamCapacity];
+    std::cout << "======================================" << std::endl;
+    std::cout << "Avcdec Constructor" << std::endl;
+    std::cout << "======================================" << std::endl;
+    
+    // Initialize JM context
+    m_jmContext.p_Dec = nullptr;
+    m_jmContext.p_Vid = nullptr;
+    m_jmContext.pDecPicList = nullptr;
+    m_jmContext.initialized = 0;
+    
+    // Copy configuration
+    m_config = *INPUT_PARAM;
+    
+    std::cout << "Config:" << std::endl;
+    std::cout << "  BS Buffer Size: " << m_config.bs_buf_size << " bytes" 
+              << " (" << m_config.bs_buf_size / (1024*1024) << " MB)" << std::endl;
+    std::cout << "  Display Buffers: " << m_config.disp_buf_num << std::endl;
+    std::cout << "  Format: " << (m_config.disp_format == 0 ? "YUV420" : "Unknown") << std::endl;
+    std::cout << "  Max Resolution: " << m_config.disp_max_width << "x" 
+              << m_config.disp_max_height << std::endl;
+    std::cout << "  Profile: " << m_config.target_profile << std::endl;
+    std::cout << "  Level: " << m_config.target_level << std::endl;
+    
+    // Allocate stream buffer
+    m_streamCapacity = m_config.bs_buf_size;
+    m_streamBuffer = new Byte[m_streamCapacity];
+    memset(m_streamBuffer, 0, m_streamCapacity);
     m_streamSize = 0;
-    m_started = false;
+    
+    std::cout << "Stream buffer allocated: " << m_streamCapacity << " bytes" << std::endl;
+    std::cout << "Constructor complete" << std::endl << std::endl;
 }
 
-AvcDecoder::~AvcDecoder()
+//============================================================================
+// Destructor (Section 5.2.2)
+//============================================================================
+
+Avcdec::~Avcdec()
 {
+    std::cout << "Avcdec Destructor" << std::endl;
+    
     if (m_started)
-        jm_stop();
-    delete[] m_streamBuffer;
+    {
+        vdec_stop();
+    }
+    
+    Cleanup();
+    
+    std::cout << "Destructor complete" << std::endl;
 }
 
-bool AvcDecoder::vdec_start(UInt16 PLAY_MODE, UInt16 POST_PROCESS)
+//============================================================================
+// vdec_start() (Section 5.2.3)
+//============================================================================
+
+void Avcdec::vdec_start(UInt16 PLAY_MODE, UInt16 POST_PROCESS)
 {
-    std::cout << "=== DECODER STARTED ===\n";
-    if (m_started)
-        return false;
-
-    m_streamSize = 0;
-    m_last_memory_pos = 0;
-    m_eos_signaled = false;
-    m_finished = false;
-
-    g_memory_buffer = m_streamBuffer;
-    g_memory_size   = 0;
-    g_memory_pos    = 0;
-
-    uint8_t dummy = 0;
-    if (jm_start_from_memory(&dummy, 0) != 0)
-        return false;
-
+    std::cout << "vdec_start(PLAY_MODE=" << PLAY_MODE 
+              << ", POST_PROCESS=" << POST_PROCESS << ")" << std::endl;
+    
     m_started = true;
-    return true;
-}
-
-void AvcDecoder::vdec_stop()
-{
-    std::cout << "\n=== DECODER STOPPING ===\n";
-    if (!m_started)
-        return;
-
-    // Flush all remaining frames from DPB
-    if (!m_finished)
-    {
-        while (true)
-        {
-            int ret = jm_decode_one_frame();
-            
-            if (ret == 1)
-            {
-                m_finished = true;
-                break;
-            }
-            
-            if (ret == 2)
-                break;
-            
-            if (ret != 0)
-                break;
-
-            // Capture frame immediately during flushing
-            captureDecodedFrame();
-        }
-    }
-
-    jm_stop();
-    m_started = false;
-    std::cout << "=== DECODER STOPPED ===\n";
-}
-
-unsigned int AvcDecoder::vdec_put_bs(
-    uint8_t* payload,
-    uint32_t length,
-    uint16_t end_of_au,
-    uint32_t pts,
-    uint16_t err_flag,
-    uint32_t err_sn_skip)
-{
-    if (!m_started) 
-        return -1;
-
-    if (m_finished)
-        return 0;
-
-    // Append data
-    if (payload && length > 0)
-    {
-        if (m_streamSize + length > m_streamCapacity)
-        {
-            std::cerr << "ERROR: Stream buffer overflow\n";
-            return -1;
-        }
-
-        memcpy(m_streamBuffer + m_streamSize, payload, length);
-        m_streamSize += length;
-
-        printf("[Feed] Added %u bytes → Total: %zu bytes\n", length, m_streamSize);
-    }
-
-    // Update JM's buffer view
+    m_finished = false;
+    m_postprocess_enabled = (POST_PROCESS != 0);
+    
+    // Initialize JM decoder
+    InitJMDecoder();
+    
+    // Initialize JM memory mode globals
     g_memory_buffer = m_streamBuffer;
     g_memory_size = m_streamSize;
+    g_memory_pos = 0;
+    
+    std::cout << "Post-processing: " << (m_postprocess_enabled ? "ENABLED" : "DISABLED") << std::endl;
+    std::cout << "Decoder started" << std::endl << std::endl;
+}
 
-    // Try to decode frames
-    decodeAvailable();
+//============================================================================
+// vdec_stop() (Section 5.2.4)
+//============================================================================
 
-    // Handle EOS signal
-    if (end_of_au == 1 && !m_eos_signaled)
+int Avcdec::vdec_stop()
+{
+    std::cout << "vdec_stop()" << std::endl;
+    
+    m_threadRunning = false;
+    
+    if (m_decodeThread.joinable())
     {
-        printf("\n[EOS] End of stream signaled\n");
-        m_eos_signaled = true;
+        std::cout << "Waiting for decode thread..." << std::endl;
+        m_decodeThread.join();
+    }
+    
+    m_started = false;
+    m_finished = true;
+    
+    std::cout << "Frames decoded: " << m_framesDecoded << std::endl;
+    std::cout << "Pictures output: " << m_picturesOutput << std::endl;
+    std::cout << "Decoder stopped" << std::endl << std::endl;
+    
+    return 0;
+}
+
+//============================================================================
+// vdec_postprocess() (Section 5.2.5)
+//============================================================================
+
+void Avcdec::vdec_postprocess(UInt16 TYPE)
+{
+    std::cout << "vdec_postprocess(TYPE=" << TYPE << ")" << std::endl;
+    m_postprocess_enabled = (TYPE != 0);
+}
+
+//============================================================================
+// vdec_put_bs() (Section 5.2.6)
+//============================================================================
+
+unsigned int Avcdec::vdec_put_bs(
+    Byte* PAYLOAD,
+    UInt32 LENGTH,
+    UInt16 END_OF_AU,
+    UInt32 PTS,
+    UInt16 ERR_FLAG,
+    UInt32 ERR_SN_SKIP)
+{
+    std::lock_guard<std::mutex> lock(m_streamMutex);
+    
+    std::cout << "vdec_put_bs(len=" << LENGTH << ", end_of_au=" << END_OF_AU 
+              << ", pts=" << PTS << ")" << std::endl;
+    
+    if (PAYLOAD && LENGTH > 0)
+    {
+        // Check buffer space
+        if (!CheckBufferSpace(LENGTH))
+        {
+            std::cout << "ERROR: Buffer overflow!" << std::endl;
+            return (unsigned int)-1;
+        }
         
-        // Flush on EOS
-        while (true)
-        {
-            int ret = jm_decode_one_frame();
-            
-            if (ret == 1)
-            {
-                m_finished = true;
-                break;
-            }
-            
-            if (ret == 2)
-                break;
-            
-            if (ret != 0)
-                break;
-
-            captureDecodedFrame();
-        }
-    }
-
-    return length;
-}
-
-void AvcDecoder::decodeAvailable()
-{
-    if (m_streamSize == 0 || m_finished)
-        return;
-
-    while (true)
-    {
-        int ret = jm_decode_one_frame();
-
-        if (ret == 1)
-        {
-            m_finished = true;
-            break;
-        }
-
-        if (ret == 2)
-        {
-            printf("[Decode] Need more data\n");
-            break;
-        }
-
-        if (ret != 0)
-        {
-            printf("[Decode] Error: ret=%d\n", ret);
-            break;
-        }
-
-        // Successfully decoded
-        captureDecodedFrame();
-        m_last_memory_pos = g_memory_pos;
-    }
-
-    // Conservative buffer compaction
-    if (g_memory_pos > 5*1024*1024)
-    {
-        printf("[Buffer] Compacting: consumed %d bytes\n", g_memory_pos);
+        // Copy to stream buffer
+        memcpy(m_streamBuffer + m_streamSize, PAYLOAD, LENGTH);
+        m_streamSize += LENGTH;
         
-        memmove(m_streamBuffer, m_streamBuffer + g_memory_pos, m_streamSize - g_memory_pos);
-        m_streamSize -= g_memory_pos;
-        g_memory_pos = 0;
-        g_memory_buffer = m_streamBuffer;
-        g_memory_size = m_streamSize;
+        std::cout << "  Added " << LENGTH << " bytes (total: " 
+                  << m_streamSize << ")" << std::endl;
     }
+    
+    // Update JM globals
+    g_memory_buffer = m_streamBuffer;
+    g_memory_size = m_streamSize;
+    
+    // Handle END_OF_AU
+    if (END_OF_AU == 1)
+    {
+        std::cout << "  END_OF_AU marker received" << std::endl;
+        HandleEndOfAU();
+    }
+    
+    return LENGTH;
 }
 
-void AvcDecoder::captureDecodedFrame()
+//============================================================================
+// vdec_get_picture() (Section 5.2.7)
+//============================================================================
+
+Byte* Avcdec::vdec_get_picture(PICMETAINFO_AVC* PIC_METAINFO)
 {
-    // Get frame dimensions FIRST
-    int width  = jm_get_width();
-    int height = jm_get_height();
-
-    // Skip if no valid dimensions
-    if (width == 0 || height == 0)
-    {
-        printf("[Capture] Invalid dimensions (%dx%d)\n", width, height);
-        jm_consume_output();
-        return;
-    }
-
-    // Now get frame data
-    unsigned char* y = jm_get_y();
-    unsigned char* u = jm_get_u();
-    unsigned char* v = jm_get_v();
-
-    if (!y || !u || !v)
-    {
-        printf("[Capture] No valid frame data (y=%p, u=%p, v=%p)\n", y, u, v);
-        jm_consume_output();
-        return;
-    }
-
-    int ySize  = width * height;
-    int uvSize = ySize / 4;
-
-    // Create and queue frame
-    Frame frame;
-    frame.width  = width;
-    frame.height = height;
-    frame.yuv.resize(ySize + 2 * uvSize);
-
-    memcpy(frame.yuv.data(), y, ySize);
-    memcpy(frame.yuv.data() + ySize, u, uvSize);
-    memcpy(frame.yuv.data() + ySize + uvSize, v, uvSize);
-
-    m_frameQueue.push(std::move(frame));
-    printf("[Captured] ✓ Frame %dx%d queued (queue size: %zu)\n", width, height, m_frameQueue.size());
-
-    jm_consume_output();
-}
-
-uint8_t* AvcDecoder::vdec_get_picture(int* width, int* height)
-{
-    if (!width || !height)
-        return nullptr;
-
+    std::lock_guard<std::mutex> lock(m_frameMutex);
+    
     if (m_frameQueue.empty())
+    {
         return nullptr;
-
+    }
+    
     Frame frame = std::move(m_frameQueue.front());
     m_frameQueue.pop();
+    
+    m_currentFrame = std::move(frame.yuv);
+    
+    if (PIC_METAINFO)
+    {
+        *PIC_METAINFO = frame.metadata;
+    }
+    
+    std::cout << "vdec_get_picture() -> " << frame.width << "x" 
+              << frame.height << std::endl;
+    
+    return m_currentFrame.data();
+}
 
-    m_buffer = std::move(frame.yuv);
+//============================================================================
+// vdec_get_status() (Section 5.2.8)
+//============================================================================
 
-    *width  = frame.width;
-    *height = frame.height;
+unsigned int Avcdec::vdec_get_status(
+    UInt16* DEC_STATUS,
+    UInt16* DISP_STATUS,
+    UInt16* ERR_STATUS)
+{
+    UInt16 dec_status = 0;
+    
+    if (m_threadRunning)
+        dec_status |= (1 << 6);  // Picture decode in progress
+    
+    if (m_streamSize == 0)
+        dec_status |= (1 << 2);  // Stream empty
+    
+    *DEC_STATUS = dec_status;
+    
+    {
+        std::lock_guard<std::mutex> lock(m_frameMutex);
+        *DISP_STATUS = m_frameQueue.empty() ? 0 : 1;
+    }
+    
+    *ERR_STATUS = 0;
+    
+    std::cout << "vdec_get_status() -> DEC=0x" << std::hex << *DEC_STATUS 
+              << " DISP=" << std::dec << (int)*DISP_STATUS 
+              << " ERR=0x" << std::hex << *ERR_STATUS << std::dec << std::endl;
+    
+    return 0;
+}
 
-    return m_buffer.data();
+//============================================================================
+// vdec_get_DecodedHandle() (Section 5.2.9)
+//============================================================================
+
+void* Avcdec::vdec_get_DecodedHandle()
+{
+    return nullptr;
+}
+
+//============================================================================
+// vdec_release_pic_buffer() (Section 5.2.10)
+//============================================================================
+
+void Avcdec::vdec_release_pic_buffer(Byte* PIC_ADDR)
+{
+    std::cout << "vdec_release_pic_buffer()" << std::endl;
+    m_currentFrame.clear();
+}
+
+//============================================================================
+// vdec_YUV420toRGB24() (Section 5.2.11)
+//============================================================================
+
+int Avcdec::vdec_YUV420toRGB24(
+    int Mode,
+    unsigned char* iBGR,
+    unsigned char* iYUV,
+    int width,
+    int height)
+{
+    std::cout << "vdec_YUV420toRGB24(" << width << "x" << height << ")" << std::endl;
+    
+    int ySize = width * height;
+    int uvSize = ySize / 4;
+    
+    unsigned char* y_ptr = iYUV;
+    unsigned char* u_ptr = iYUV + ySize;
+    unsigned char* v_ptr = iYUV + ySize + uvSize;
+    
+    for (int i = 0; i < ySize; i++)
+    {
+        int x = i % width;
+        int y = i / width;
+        int u_idx = (y / 2) * (width / 2) + (x / 2);
+        
+        int Y = y_ptr[i];
+        int U = u_ptr[u_idx];
+        int V = v_ptr[u_idx];
+        
+        int R = Y + (1.402f * (V - 128));
+        int G = Y - (0.344f * (U - 128)) - (0.714f * (V - 128));
+        int B = Y + (1.772f * (U - 128));
+        
+        R = std::max(0, std::min(255, R));
+        G = std::max(0, std::min(255, G));
+        B = std::max(0, std::min(255, B));
+        
+        int rgb_idx = i * 3;
+        iBGR[rgb_idx] = R;
+        iBGR[rgb_idx + 1] = G;
+        iBGR[rgb_idx + 2] = B;
+    }
+    
+    return width * height * 3;
+}
+
+//============================================================================
+// vdec_YUV420toRGB24_2() (Section 5.2.12)
+//============================================================================
+
+void Avcdec::vdec_YUV420toRGB24_2(
+    unsigned char* y,
+    unsigned char* u,
+    unsigned char* v,
+    unsigned char* rgb,
+    int width,
+    int height)
+{
+    std::cout << "vdec_YUV420toRGB24_2(" << width << "x" << height << ")" << std::endl;
+    
+    int ySize = width * height;
+    
+    for (int i = 0; i < ySize; i++)
+    {
+        int x = i % width;
+        int y_idx = i / width;
+        int u_idx = (y_idx / 2) * (width / 2) + (x / 2);
+        
+        int Y = y[i];
+        int U = u[u_idx];
+        int V = v[u_idx];
+        
+        int R = Y + (1.402f * (V - 128));
+        int G = Y - (0.344f * (U - 128)) - (0.714f * (V - 128));
+        int B = Y + (1.772f * (U - 128));
+        
+        R = std::max(0, std::min(255, R));
+        G = std::max(0, std::min(255, G));
+        B = std::max(0, std::min(255, B));
+        
+        int rgb_idx = i * 3;
+        rgb[rgb_idx] = R;
+        rgb[rgb_idx + 1] = G;
+        rgb[rgb_idx + 2] = B;
+    }
+}
+
+//============================================================================
+// YUV420toRGB24_DX() (Section 5.2.13)
+//============================================================================
+
+int Avcdec::YUV420toRGB24_DX(
+    int Mode,
+    unsigned char* iBGR,
+    unsigned char* iYUV,
+    int width,
+    int height)
+{
+    return vdec_YUV420toRGB24(Mode, iBGR, iYUV, width, height);
+}
+
+//============================================================================
+// Private Methods
+//============================================================================
+
+void Avcdec::InitJMDecoder()
+{
+    std::cout << "InitJMDecoder()" << std::endl;
+    
+    // Create input parameters for JM
+    InputParameters inputParams = {};
+    
+    // Set to memory mode (no file I/O)
+    strcpy(inputParams.infile, "");
+    strcpy(inputParams.outfile, "");
+    strcpy(inputParams.reffile, "");
+    
+    // Configure JM parameters
+    inputParams.FileFormat = 0;        // Annex B format
+    inputParams.write_uv = 1;          // Write UV
+    inputParams.bDisplayDecParams = 0;  // No display
+    
+    std::cout << "Opening JM decoder..." << std::endl;
+    
+    if (OpenDecoder(&inputParams) != DEC_OPEN_NOERR)
+    {
+        std::cout << "ERROR: OpenDecoder failed!" << std::endl;
+        return;
+    }
+    
+    m_jmContext.p_Dec = (void*)p_Dec;
+    m_jmContext.p_Vid = (void*)(p_Dec ? p_Dec->p_Vid : nullptr);
+    m_jmContext.initialized = 1;
+    
+    std::cout << "JM decoder initialized" << std::endl;
+}
+
+void Avcdec::DecodeThreadFunc()
+{
+    std::cout << "Decode thread started" << std::endl;
+    
+    while (m_threadRunning)
+    {
+        // Update JM globals
+        {
+            std::lock_guard<std::mutex> lock(m_streamMutex);
+            g_memory_buffer = m_streamBuffer;
+            g_memory_size = m_streamSize;
+        }
+        
+        // Decode one frame
+        int ret = DecodeOneFrame(p_Dec);
+        
+        if (ret == DEC_EOS)
+        {
+            std::cout << "  EOS reached" << std::endl;
+            break;
+        }
+        
+        if (ret == DEC_SUCCEED)
+        {
+            m_framesDecoded++;
+            std::cout << "  Frame decoded: " << m_framesDecoded << std::endl;
+            ProcessDecodedFrames();
+        }
+        
+        // Small sleep to prevent CPU spinning
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    
+    std::cout << "Decode thread stopped" << std::endl;
+}
+
+void Avcdec::ProcessDecodedFrames()
+{
+    if (!p_Dec || !p_Dec->p_Vid)
+        return;
+    
+    VideoParameters *p_Vid = p_Dec->p_Vid;
+    
+    // Get decoded picture
+    if (pDecPicList)
+    {
+        int width = pDecPicList->iWidth;
+        int height = pDecPicList->iHeight;
+        
+        if (width > 0 && height > 0 && pDecPicList->pY)
+        {
+            Frame frame;
+            frame.width = width;
+            frame.height = height;
+            
+            // Calculate size
+            int ySize = width * height;
+            int uvSize = ySize / 4;
+            int totalSize = ySize + 2 * uvSize;
+            
+            frame.yuv.resize(totalSize);
+            
+            // Copy Y plane
+            memcpy(frame.yuv.data(), pDecPicList->pY, ySize);
+            
+            // Copy U plane
+            if (pDecPicList->pU)
+                memcpy(frame.yuv.data() + ySize, pDecPicList->pU, uvSize);
+            
+            // Copy V plane
+            if (pDecPicList->pV)
+                memcpy(frame.yuv.data() + ySize + uvSize, pDecPicList->pV, uvSize);
+            
+            // Fill metadata
+            frame.metadata.pic_width = width;
+            frame.metadata.pic_height = height;
+            frame.metadata.pic_type = 0;  // Placeholder
+            frame.metadata.bit_depth = 8;
+            frame.metadata.pts.input_pts = 0;
+            
+            // Queue frame
+            {
+                std::lock_guard<std::mutex> lock(m_frameMutex);
+                m_frameQueue.push(std::move(frame));
+                m_picturesOutput++;
+            }
+            
+            std::cout << "    Picture queued: " << width << "x" << height 
+                      << " (total: " << m_picturesOutput << ")" << std::endl;
+        }
+    }
+}
+
+bool Avcdec::CheckBufferSpace(UInt32 needed_bytes)
+{
+    return (m_streamSize + needed_bytes <= m_streamCapacity);
+}
+
+void Avcdec::HandleEndOfAU()
+{
+    if (CheckBufferSpace(3))
+    {
+        m_streamBuffer[m_streamSize++] = 0x00;
+        m_streamBuffer[m_streamSize++] = 0x00;
+        m_streamBuffer[m_streamSize++] = 0x01;
+        std::cout << "  END_OF_AU marker added" << std::endl;
+    }
+}
+
+void Avcdec::Cleanup()
+{
+    std::cout << "Cleanup()" << std::endl;
+    
+    m_threadRunning = false;
+    
+    if (m_decodeThread.joinable())
+    {
+        m_decodeThread.join();
+    }
+    
+    if (m_jmContext.initialized)
+    {
+        CloseDecoder();
+        m_jmContext.initialized = 0;
+    }
+    
+    if (m_streamBuffer)
+    {
+        delete[] m_streamBuffer;
+        m_streamBuffer = nullptr;
+    }
+    
+    {
+        std::lock_guard<std::mutex> lock(m_frameMutex);
+        while (!m_frameQueue.empty())
+        {
+            m_frameQueue.pop();
+        }
+        m_currentFrame.clear();
+    }
 }
