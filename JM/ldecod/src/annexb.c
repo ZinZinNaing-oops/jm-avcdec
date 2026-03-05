@@ -20,9 +20,11 @@
 static const int IOBUFFERSIZE = 512*1024; //65536;
 
 //zzn
-unsigned char* g_memory_buffer = NULL;
-int g_memory_size = 0;
-int g_memory_pos = 0;
+// Global variables for memory-based input
+unsigned char* g_memory_buffer = NULL;  //What JM reads from , Points to m_streamBuffer
+int g_memory_size = 0;  //How much JM can read , Same as m_streamSize
+int g_memory_pos = 0;  //Where JM is reading
+int g_memory_mode = 0;  // 0=file mode, 1=memory mode
 
 //zzn
 void jm_set_input_buffer(unsigned char* data, int size)
@@ -126,6 +128,23 @@ static inline int getChunk(ANNEXB_t *annex_b)
 */
 static inline byte getfbyte(ANNEXB_t *annex_b)
 {
+  //zzn
+  // ========== MEMORY MODE ==========
+  if (g_memory_mode)
+  {
+    if (g_memory_pos >= g_memory_size)
+    {
+      annex_b->is_eof = TRUE;
+      return -1;
+    }
+        
+    unsigned char byte_val = g_memory_buffer[g_memory_pos];
+    g_memory_pos++;
+        
+    return byte_val;
+  }
+
+  // ========== FILE MODE (original) ==========
   if (0 == annex_b->bytesinbuffer)
   {
     if (0 == getChunk(annex_b))
@@ -133,6 +152,28 @@ static inline byte getfbyte(ANNEXB_t *annex_b)
   }
   annex_b->bytesinbuffer--;
   return (*annex_b->iobufferread++);
+}
+
+//zzn
+void AnnexBMemoryModeInit(unsigned char *buffer, int size)
+{
+    g_memory_buffer = buffer;
+    g_memory_size = size;
+    g_memory_pos = 0;
+    g_memory_mode = 1;
+}
+
+void AnnexBMemoryModeReset(void)
+{
+    g_memory_pos = 0;
+}
+
+void AnnexBMemoryModeExit(void)
+{
+    g_memory_mode = 0;
+    g_memory_buffer = NULL;
+    g_memory_size = 0;
+    g_memory_pos = 0;
 }
 
 /*!

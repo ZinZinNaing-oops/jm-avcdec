@@ -2,16 +2,12 @@
 
 #include <vector>
 #include <queue>
-#include <mutex>
-#include <thread>
 #include <iostream>
 #include <cstring>
-#include <memory>
 
 //============================================================================
-// Data Types (Specification 5.1.1)
+// Data Types 
 //============================================================================
-
 typedef unsigned char   Byte;
 typedef unsigned char   PIXEL;
 typedef unsigned char   Bool;
@@ -23,25 +19,20 @@ typedef short           SInt16;
 typedef long            SInt32;
 
 //============================================================================
-// Data Structures (Specification 5.1.2)
+// Data Structures
 //============================================================================
-
-/**
- * DECPARAM_AVC - Decoder Parameters
- */
+// Decoder configuration parameters
 typedef struct {
-    UInt32  bs_buf_size;            ///< Bitstream buffer size (bytes)
-    UInt16  disp_buf_num;           ///< Display picture buffer count
-    UInt16  disp_format;            ///< Display format (0=YUV4:2:0)
-    UInt16  disp_max_width;         ///< Max horizontal pixels
-    UInt16  disp_max_height;        ///< Max vertical lines
-    UInt16  target_profile;         ///< Target H.264 profile
-    UInt16  target_level;           ///< Target H.264 level
+    UInt32  bs_buf_size;
+    UInt16  disp_buf_num;
+    UInt16  disp_format;
+    UInt16  disp_max_width;
+    UInt16  disp_max_height;
+    UInt16  target_profile;
+    UInt16  target_level;
 } DECPARAM_AVC;
 
-/**
- * TIMEINFO_AVC - Timing Information
- */
+// Timing information structure
 typedef struct {
     UInt32  input_pts;
     int     m_ts_success;
@@ -59,9 +50,7 @@ typedef struct {
     UInt32  initial_cpb_removal_delay_offset;
 } TIMEINFO_AVC;
 
-/**
- * PICMETAINFO_AVC - Picture Metadata
- */
+// Picture metadata structure
 typedef struct {
     TIMEINFO_AVC  pts;
     UInt16        pic_width;
@@ -71,39 +60,34 @@ typedef struct {
 } PICMETAINFO_AVC;
 
 //============================================================================
-// JM Integration Structures
+// Avcdec Class 
 //============================================================================
-
-struct JMDecoderContext {
-    void* p_Dec;                        // DecoderParams*
-    void* p_Vid;                        // VideoParameters*
-    void* pDecPicList;                  // DecodedPicList*
-    int initialized;
-};
-
-//============================================================================
-// Avcdec Class (Specification Section 5.2)
-//============================================================================
-
 class Avcdec
 {
 public:
-    // Section 5.2.1 - Constructor
+    // Constructor
+    // Allocates stream buffer and initializes decoder state
     explicit Avcdec(DECPARAM_AVC *INPUT_PARAM);
     
-    // Section 5.2.2 - Destructor
+    // Destructor
+    // Releases all allocated resources
     ~Avcdec();
 
-    // Section 5.2.3 - Start decoding
+    // Start decoding
+    // Initializes JM decoder and prepares for data input
     void vdec_start(UInt16 PLAY_MODE, UInt16 POST_PROCESS);
     
-    // Section 5.2.4 - Stop decoding
+    // Stop decoding
+    // Terminates decoder engine
     int vdec_stop();
     
-    // Section 5.2.5 - Set post-processing
+    // Set post-processing filter
+    // Enables/disables deblocking filter
     void vdec_postprocess(UInt16 TYPE);
     
-    // Section 5.2.6 - Feed bitstream
+    // Feed H.264 bitstream
+    // Accumulates data in stream buffer
+    // Input format: H.264 Annex B (start codes: 0x00 0x00 0x01 or 0x00 0x00 0x00 0x01)
     unsigned int vdec_put_bs(
         Byte* PAYLOAD,
         UInt32 LENGTH,
@@ -113,23 +97,29 @@ public:
         UInt32 ERR_SN_SKIP
     );
     
-    // Section 5.2.7 - Get picture
+    // Get decoded picture
+    // Returns YUV420 data when available
+    // Output format: I420 (YUV 4:2:0 planar)
     Byte* vdec_get_picture(PICMETAINFO_AVC* PIC_METAINFO);
     
-    // Section 5.2.8 - Get status
+    // Get decoder status
+    // Returns current state flags
     unsigned int vdec_get_status(
         UInt16* DEC_STATUS,
         UInt16* DISP_STATUS,
         UInt16* ERR_STATUS
     );
     
-    // Section 5.2.9 - Get decoded handle
+    // Get picture ready handle
+    // Returns event handle for notification
     void* vdec_get_DecodedHandle();
     
-    // Section 5.2.10 - Release picture buffer
+    // Release picture buffer
+    // Marks buffer as available for reuse
     void vdec_release_pic_buffer(Byte* PIC_ADDR);
     
-    // Section 5.2.11 - Convert YUV420 to RGB24
+    // Convert YUV420 to RGB24
+    // Color space conversion
     int vdec_YUV420toRGB24(
         int Mode,
         unsigned char* iBGR,
@@ -138,7 +128,8 @@ public:
         int height
     );
     
-    // Section 5.2.12 - Fast YUV420 to RGB24
+    // Fast YUV420 to RGB24 conversion
+    // Optimized version with separate planes
     void vdec_YUV420toRGB24_2(
         unsigned char* y,
         unsigned char* u,
@@ -148,7 +139,8 @@ public:
         int height
     );
     
-    // Section 5.2.13 - YUV420 to BGR24 for DirectDraw
+    // YUV420 to BGR24 for DirectDraw
+    // BGR byte order for DirectDraw surface
     int YUV420toRGB24_DX(
         int Mode,
         unsigned char* iBGR,
@@ -158,23 +150,32 @@ public:
     );
 
 private:
+    // Configuration
     DECPARAM_AVC m_config;
     
-    // Stream buffer
-    Byte* m_streamBuffer;
-    UInt32 m_streamCapacity;
-    UInt32 m_streamSize;
-    std::mutex m_streamMutex;
+    // Stream buffer (memory-based input)
+    Byte* m_streamBuffer;  // pointer to allocated memory
+    UInt32 m_streamCapacity; //Max data can be stored
+    UInt32 m_streamSize; //How much data you have(from 0 to m_streamCapacity)
+
+    // PICTURE BUFFERS (OUTPUT)
+    struct PictureBuffer {
+        Byte* data;                 // YUV420 data
+        int width;
+        int height;
+        bool locked;                // In use by application
+    };
+    
+    PictureBuffer* m_pictureBuffers;  // Array of buffers
+    UInt16 m_bufferCount;             // Count: disp_buf_num
+    int m_currentBufferIndex;         // Current output buffer
     
     // Decoder state
     bool m_started;
     bool m_finished;
     bool m_postprocess_enabled;
     
-    // JM decoder context
-    JMDecoderContext m_jmContext;
-    
-    // Frame storage
+    // Output frame storage
     struct Frame {
         std::vector<uint8_t> yuv;
         int width;
@@ -182,23 +183,14 @@ private:
         PICMETAINFO_AVC metadata;
     };
     
-    std::queue<Frame> m_frameQueue;
-    std::mutex m_frameMutex;
-    std::vector<uint8_t> m_currentFrame;
-    
-    // Decode thread
-    std::thread m_decodeThread;
-    bool m_threadRunning;
-    
-    // Statistics
-    int m_framesDecoded;
-    int m_picturesOutput;
+    // Output frame queue
+    std::queue<PICMETAINFO_AVC> m_frameInfoQueue;
     
     // Private methods
     void InitJMDecoder();
-    void DecodeThreadFunc();
-    void ProcessDecodedFrames();
+    void DecodeBuffer();
+    void CaptureDecodedFrame();
     bool CheckBufferSpace(UInt32 needed_bytes);
+    PictureBuffer* GetAvailableBuffer();  
     void HandleEndOfAU();
-    void Cleanup();
 };
