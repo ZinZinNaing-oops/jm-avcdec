@@ -5,6 +5,12 @@
 #include <iostream>
 #include <cstring>
 
+// Forward Declarations
+extern "C" {
+    typedef struct decodedpic_t DecodedPicList;  
+    typedef struct storable_picture StorablePicture;  
+}
+
 // Data Types 
 typedef unsigned char   Byte;
 typedef unsigned char   PIXEL;
@@ -183,6 +189,7 @@ private:
     void InitJMDecoder();
     void DecodeBuffer();
     void CaptureDecodedFrame();
+    void CaptureSinglePicture(DecodedPicList *pPic);
     bool CheckBufferSpace(UInt32 needed_bytes);
     PictureBuffer* GetAvailableBuffer();  
     void HandleEndOfAU();
