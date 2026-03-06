@@ -5,9 +5,7 @@
 #include <iostream>
 #include <cstring>
 
-//============================================================================
 // Data Types 
-//============================================================================
 typedef unsigned char   Byte;
 typedef unsigned char   PIXEL;
 typedef unsigned char   Bool;
@@ -18,10 +16,7 @@ typedef char            SInt_8;
 typedef short           SInt16;
 typedef long            SInt32;
 
-//============================================================================
-// Data Structures
-//============================================================================
-// Decoder configuration parameters
+// Decoder configuration parameters structure
 typedef struct {
     UInt32  bs_buf_size;
     UInt16  disp_buf_num;
@@ -59,15 +54,13 @@ typedef struct {
     UInt16        bit_depth;
 } PICMETAINFO_AVC;
 
-//============================================================================
 // Avcdec Class 
-//============================================================================
 class Avcdec
 {
 public:
     // Constructor
-    // Allocates stream buffer and initializes decoder state
-    explicit Avcdec(DECPARAM_AVC *INPUT_PARAM);
+    // Allocates stream buffer, picture buffer and initializes decoder state
+    Avcdec(DECPARAM_AVC *INPUT_PARAM);
     
     // Destructor
     // Releases all allocated resources
@@ -87,7 +80,6 @@ public:
     
     // Feed H.264 bitstream
     // Accumulates data in stream buffer
-    // Input format: H.264 Annex B (start codes: 0x00 0x00 0x01 or 0x00 0x00 0x00 0x01)
     unsigned int vdec_put_bs(
         Byte* PAYLOAD,
         UInt32 LENGTH,
@@ -99,7 +91,6 @@ public:
     
     // Get decoded picture
     // Returns YUV420 data when available
-    // Output format: I420 (YUV 4:2:0 planar)
     Byte* vdec_get_picture(PICMETAINFO_AVC* PIC_METAINFO);
     
     // Get decoder status
@@ -177,6 +168,7 @@ private:
     
     // Output frame storage
     struct Frame {
+        Byte* data; 
         std::vector<uint8_t> yuv;
         int width;
         int height;
@@ -185,6 +177,7 @@ private:
     
     // Output frame queue
     std::queue<PICMETAINFO_AVC> m_frameInfoQueue;
+    std::queue<Frame> m_frameQueue;  // Queue COMPLETE frames with data pointers
     
     // Private methods
     void InitJMDecoder();
