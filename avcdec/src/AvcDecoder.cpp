@@ -99,17 +99,16 @@ Avcdec::~Avcdec()
         std::cout << "  - Stream buffer freed" << std::endl;
     }
     
-    // Free picture buffers
-    if (m_pictureBuffers)
+    // Free picture buffers ONLY if allocated
+    if (m_pictureBuffers && m_bufferCount > 0)
     {
         for (int i = 0; i < m_bufferCount; i++)
         {
-            // Only delete if it's OUR allocation (not JM's)
-            if (m_pictureBuffers[i].data && m_pictureBuffers[i].data != pDecPicList->pY)
+            if (m_pictureBuffers[i].data != nullptr)
             {
                 delete[] m_pictureBuffers[i].data;
+                m_pictureBuffers[i].data = nullptr;
             }
-            m_pictureBuffers[i].data = nullptr;
         }
         delete[] m_pictureBuffers;
         m_pictureBuffers = nullptr;
@@ -170,7 +169,6 @@ void Avcdec::vdec_postprocess(UInt16 TYPE)
 //============================================================================
 // 5.2.6 vdec_put_bs() - Feed H.264 bitstream data
 //============================================================================
-
 unsigned int Avcdec::vdec_put_bs(
     Byte* PAYLOAD,
     UInt32 LENGTH,
@@ -223,9 +221,8 @@ unsigned int Avcdec::vdec_put_bs(
 }
 
 //============================================================================
-// 5.2.7 vdec_get_picture() - Get decoded picture
+// vdec_get_picture() - Get decoded picture
 //============================================================================
-
 Byte* Avcdec::vdec_get_picture(PICMETAINFO_AVC* PIC_METAINFO)
 {
     if (m_frameInfoQueue.empty())
@@ -256,7 +253,7 @@ Byte* Avcdec::vdec_get_picture(PICMETAINFO_AVC* PIC_METAINFO)
 }
 
 //============================================================================
-// 5.2.8 vdec_get_status() - Get decoder status
+// vdec_get_status() - Get decoder status
 //============================================================================
 
 unsigned int Avcdec::vdec_get_status(
@@ -441,6 +438,12 @@ void Avcdec::DecodeBuffer()
 {
     std::cout << "  Starting decode..." << std::endl;
     
+    if (!p_Dec)
+    {
+        std::cout << "  ERROR: p_Dec is NULL" << std::endl;
+        return;
+    }
+    
     int frame_count = 0;
     
     // Reset memory position
@@ -466,37 +469,61 @@ void Avcdec::DecodeBuffer()
         if (ret == DEC_SUCCEED)
         {
             frame_count++;
-            
-            // IMPORTANT: Capture decoded picture
-            if (pDecPicList)  // Check if picture available
-            {
-                std::cout << "    Capturing frame " << frame_count << std::endl;
-                CaptureDecodedFrame();
-            }
+            std::cout << "    Capturing frame " << frame_count << std::endl;
+            CaptureDecodedFrame();
         }
     }
 }
 
-// NO stride handling - cleaner, matches specification
 void Avcdec::CaptureDecodedFrame()
 {
-    if (!pDecPicList || !pDecPicList->bValid)
+    if (!pDecPicList)
         return;
+
+    // Check if picture is marked as valid
+    if (pDecPicList->bValid != 1)
+    {
+        return;
+    }
     
     int width = pDecPicList->iWidth;
     int height = pDecPicList->iHeight;
     
+    if (width <= 0 || height <= 0)
+    {
+        return;
+    }
+    
+    if (!pDecPicList->pY)
+    {
+        return;
+    }
+
     PictureBuffer* buffer = GetAvailableBuffer();
     if (!buffer)
+    {
+        std::cout << "    WARNING: No available buffer" << std::endl;
         return;
-    
+    }
+        
+    // Calculate YUV420 sizes
     int ySize = width * height;
     int uvSize = ySize / 4;
     
-    // Simple direct copy
+    // Copy Y plane
     memcpy(buffer->data, pDecPicList->pY, ySize);
-    memcpy(buffer->data + ySize, pDecPicList->pU, uvSize);
-    memcpy(buffer->data + ySize + uvSize, pDecPicList->pV, uvSize);
+    
+    // Copy U plane
+    if (pDecPicList->pU)
+    {
+        memcpy(buffer->data + ySize, pDecPicList->pU, uvSize);
+    }
+    
+    // Copy V plane
+    if (pDecPicList->pV)
+    {
+        memcpy(buffer->data + ySize + uvSize, pDecPicList->pV, uvSize);
+    }
     
     // Queue metadata
     PICMETAINFO_AVC info;
@@ -505,8 +532,7 @@ void Avcdec::CaptureDecodedFrame()
     info.pic_type = 0;
     info.bit_depth = pDecPicList->iBitDepth;
     
-    m_frameInfoQueue.push(info);
-    
+    m_frameInfoQueue.push(info);   
     std::cout << "    Stored: " << width << "x" << height << std::endl;
 }
 
@@ -523,6 +549,7 @@ void Avcdec::HandleEndOfAU()
         m_streamBuffer[m_streamSize++] = 0x00;
         m_streamBuffer[m_streamSize++] = 0x00;
         m_streamBuffer[m_streamSize++] = 0x01;
+        g_memory_size = m_streamSize;
     }
 }
 

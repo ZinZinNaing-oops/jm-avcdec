@@ -75,7 +75,6 @@ int main(int argc, char* argv[])
     }
 
     file.close();
-
     std::cout << std::endl;
 
     // Get decoded pictures
