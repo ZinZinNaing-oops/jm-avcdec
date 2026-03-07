@@ -155,17 +155,17 @@ private:
     UInt32 m_streamCapacity; //Max data can be stored
     UInt32 m_streamSize; //How much data you have(from 0 to m_streamCapacity)
 
-    // PICTURE BUFFERS (OUTPUT)
+    // Picture buffer structure
     struct PictureBuffer {
-        Byte* data;                 // YUV420 data
+        Byte* data;
         int width;
         int height;
-        bool locked;                // In use by application
+        bool locked;
+        int poc;  // Picture Order Count
     };
     
     PictureBuffer* m_pictureBuffers;  // Array of buffers
     UInt16 m_bufferCount;             // Count: disp_buf_num
-    int m_currentBufferIndex;         // Current output buffer
     
     // Decoder state
     bool m_started;
@@ -173,24 +173,24 @@ private:
     bool m_postprocess_enabled;
     
     // Output frame storage
-    struct Frame {
-        Byte* data; 
-        std::vector<uint8_t> yuv;
+    struct QueuedFrame {
+        Byte* data;
         int width;
         int height;
+        int poc;
         PICMETAINFO_AVC metadata;
     };
     
-    // Output frame queue
-    std::queue<PICMETAINFO_AVC> m_frameInfoQueue;
-    std::queue<Frame> m_frameQueue;  // Queue COMPLETE frames with data pointers
+    std::queue<QueuedFrame> m_frameQueue;
+    std::mutex m_frameQueueMutex;
+    int m_frameCount;
     
     // Private methods
     void InitJMDecoder();
     void DecodeBuffer();
-    void CaptureDecodedFrame();
-    void CaptureSinglePicture(DecodedPicList *pPic);
     bool CheckBufferSpace(UInt32 needed_bytes);
-    PictureBuffer* GetAvailableBuffer();  
     void HandleEndOfAU();
+    void QueueFrameForDisplay(PictureBuffer* buffer);
+    PictureBuffer* GetAvailableBuffer();    
+    void ProcessDecodedPicture(DecodedPicList *pPic);
 };

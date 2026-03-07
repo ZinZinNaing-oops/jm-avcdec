@@ -87,7 +87,6 @@ Avcdec::Avcdec(DECPARAM_AVC *INPUT_PARAM)
 //============================================================================
 // Destructor - Cleanup decoder
 //============================================================================
-
 Avcdec::~Avcdec()
 {
     std::cout << "Freeing buffers:" << std::endl;
@@ -118,8 +117,8 @@ Avcdec::~Avcdec()
     }
     
     // Clear queue
-    while (!m_frameInfoQueue.empty())
-        m_frameInfoQueue.pop();
+    while (!m_frameQueue.empty())
+        m_frameQueue.pop();
     
     std::cout << "Cleanup complete" << std::endl;
 }
@@ -225,31 +224,32 @@ unsigned int Avcdec::vdec_put_bs(
 //============================================================================
 Byte* Avcdec::vdec_get_picture(PICMETAINFO_AVC* PIC_METAINFO)
 {
-    if (m_frameInfoQueue.empty())
     {
-        return nullptr;
-    }
-    
-    PICMETAINFO_AVC info = m_frameInfoQueue.front();
-    m_frameInfoQueue.pop();
-    
-    if (PIC_METAINFO)
-    {
-        *PIC_METAINFO = info;
-    }
-    
-    for (int i = 0; i < m_bufferCount; i++)
-    {
-        if (m_pictureBuffers[i].locked)
+        std::lock_guard<std::mutex> lock(m_frameQueueMutex);
+        
+        if (m_frameQueue.empty())
         {
-            std::cout << "vdec_get_picture() -> Buffer " << i 
-                      << " (" << info.pic_width << "x" << info.pic_height 
-                      << ")" << std::endl;
-            return m_pictureBuffers[i].data;
+            std::cout << "  vdec_get_picture(): No frames available" << std::endl;
+            return NULL;
         }
+        
+        QueuedFrame frame = m_frameQueue.front();
+        m_frameQueue.pop();
+        
+        std::cout << "  vdec_get_picture(): Retrieved frame " << m_frameCount 
+                  << " (" << frame.width << "x" << frame.height << ")" << std::endl;
+        
+        if (PIC_METAINFO)
+        {
+            PIC_METAINFO->pic_width = frame.width;
+            PIC_METAINFO->pic_height = frame.height;
+            PIC_METAINFO->pic_type = frame.metadata.pic_type;
+            PIC_METAINFO->bit_depth = frame.metadata.bit_depth;
+        }
+        
+        m_frameCount++;
+        return frame.data;
     }
-    
-    return nullptr;
 }
 
 //============================================================================
@@ -268,7 +268,7 @@ unsigned int Avcdec::vdec_get_status(
         dec_status |= (1 << 6);  // Decoding in progress
     
     *DEC_STATUS = dec_status;
-    *DISP_STATUS = m_frameInfoQueue.empty() ? 0 : 1;
+    //*DISP_STATUS = m_frameInfoQueue.empty() ? 0 : 1;
     *ERR_STATUS = 0;
     
     return 0;
@@ -289,18 +289,23 @@ void* Avcdec::vdec_get_DecodedHandle()
 
 void Avcdec::vdec_release_pic_buffer(Byte* PIC_ADDR)
 {
-    std::cout << "vdec_release_pic_buffer()" << std::endl;
-
-    // Find and unlock buffer
+    if (!PIC_ADDR)
+        return;
+    
+    std::cout << "  vdec_release_pic_buffer(): Releasing buffer " << (void*)PIC_ADDR << std::endl;
+    
+    // Mark buffer as available
     for (int i = 0; i < m_bufferCount; i++)
     {
         if (m_pictureBuffers[i].data == PIC_ADDR)
         {
             m_pictureBuffers[i].locked = false;
-            std::cout << "  - Buffer " << i << " released" << std::endl;
+            std::cout << "    ✓ Buffer " << i << " marked as available" << std::endl;
             return;
         }
     }
+    
+    std::cout << "    WARNING: Buffer address not found" << std::endl;
 }
 
 //============================================================================
@@ -443,9 +448,10 @@ void Avcdec::DecodeBuffer()
     }
     
     int frame_count = 0;
+    int picture_count = 0;
     g_memory_pos = 0;
     
-    std::cout << "  Starting decode..." << std::endl;
+    std::cout << "  Starting decode loop..." << std::endl;
     
     while (true)
     {
@@ -453,242 +459,156 @@ void Avcdec::DecodeBuffer()
         
         if (ret == DEC_EOS)
         {
-            std::cout << "  Decode complete: " << frame_count << " frames" << std::endl;
+            std::cout << "  ========== END OF STREAM ==========" << std::endl;
             break;
         }
         
         if (ret == DEC_SUCCEED)
         {
             frame_count++;
-            std::cout << "  Frame " << frame_count << " decoded" << std::endl;
+            std::cout << "\n  ===== Frame " << frame_count << " Decoded =====" << std::endl;
             
-            // ========== ACCESS JM'S INTERNAL DECODED PICTURE ==========
+            // ========== RETRIEVE DECODED PICTURE ==========
             if (p_Dec->p_Vid)
             {
                 VideoParameters *p_Vid = p_Dec->p_Vid;
                 
-                // Get picture from pDecOuputPic (which JM allocated)
-                DecodedPicList *pDecPic = p_Dec->p_Vid->pDecOuputPic;
+                // Get the head of the decoded picture list
+                DecodedPicList *pDecPic = p_Vid->pDecOuputPic;
                 
                 if (pDecPic)
                 {
-                    std::cout << "    pDecPic exists: iWidth=" << pDecPic->iWidth 
-                              << " iHeight=" << pDecPic->iHeight << std::endl;
+                    std::cout << "    pDecPic found: iWidth=" << pDecPic->iWidth 
+                              << " iHeight=" << pDecPic->iHeight 
+                              << " POC=" << pDecPic->iPOC 
+                              << " bValid=" << pDecPic->bValid << std::endl;
                     
-                    // Check if picture was actually output by JM
-                    if (pDecPic->iWidth > 0 && pDecPic->iHeight > 0)
+                    // ========== VALIDATE PICTURE ==========
+                    if (pDecPic->bValid == 1 && 
+                        pDecPic->iWidth > 0 && 
+                        pDecPic->iHeight > 0 && 
+                        pDecPic->pY != NULL)
                     {
-                        std::cout << "      Capturing: POC from structure" << std::endl;
+                        std::cout << "    ✓ Picture is VALID and READY" << std::endl;
+                        std::cout << "      Width:  " << pDecPic->iWidth << std::endl;
+                        std::cout << "      Height: " << pDecPic->iHeight << std::endl;
+                        std::cout << "      Y buffer: " << (void*)pDecPic->pY << std::endl;
+                        std::cout << "      U buffer: " << (void*)pDecPic->pU << std::endl;
+                        std::cout << "      V buffer: " << (void*)pDecPic->pV << std::endl;
                         
-                        // Get picture from JM's dec_picture or pending_output
-                        StorablePicture *jm_pic = NULL;
+                        // ========== PROCESS THE PICTURE ==========
+                        ProcessDecodedPicture(pDecPic);
+                        picture_count++;
                         
-                        // Try dec_picture first
-                        if (p_Vid->dec_picture)
-                        {
-                            jm_pic = p_Vid->dec_picture;
-                            std::cout << "      Using dec_picture" << std::endl;
-                        }
-                        // Try pending_output
-                        else if (p_Vid->pending_output)
-                        {
-                            jm_pic = p_Vid->pending_output;
-                            std::cout << "      Using pending_output" << std::endl;
-                        }
+                        // Mark picture as consumed
+                        pDecPic->bValid = 0;
                         
-                        if (jm_pic && jm_pic->imgY)
-                        {
-                            // NOW manually copy to pDecPic->pY
-                            int width = jm_pic->size_x;
-                            int height = jm_pic->size_y;
-                            int width_cr = jm_pic->size_x_cr;
-                            int height_cr = jm_pic->size_y_cr;
-                            
-                            std::cout << "      Copying JM picture: " << width << "x" << height << std::endl;
-                            
-                            // Ensure pDecPic has allocated memory
-                            if (!pDecPic->pY)
-                            {
-                                std::cout << "      ERROR: pDecPic->pY not allocated!" << std::endl;
-                                continue;
-                            }
-                            
-                            // Copy Y plane
-                            for (int row = 0; row < height; row++)
-                            {
-                                memcpy(pDecPic->pY + (row * width),
-                                       jm_pic->imgY[row],
-                                       width);
-                            }
-                            
-                            // Copy U plane
-                            if (jm_pic->imgUV && pDecPic->pU)
-                            {
-                                for (int row = 0; row < height_cr; row++)
-                                {
-                                    memcpy(pDecPic->pU + (row * width_cr),
-                                           jm_pic->imgUV[0][row],
-                                           width_cr);
-                                }
-                            }
-                            
-                            // Copy V plane
-                            if (jm_pic->imgUV && pDecPic->pV)
-                            {
-                                for (int row = 0; row < height_cr; row++)
-                                {
-                                    memcpy(pDecPic->pV + (row * width_cr),
-                                           jm_pic->imgUV[1][row],
-                                           width_cr);
-                                }
-                            }
-                            
-                            std::cout << "      Data copied successfully" << std::endl;
-                            
-                            // Now capture it
-                            CaptureSinglePicture(pDecPic);
-                        }
-                        else
-                        {
-                            std::cout << "      ERROR: No JM picture available" << std::endl;
-                        }
+                        std::cout << "    Picture marked as consumed" << std::endl;
                     }
+                    else
+                    {
+                        std::cout << "    ✗ Picture NOT valid" << std::endl;
+                        if (pDecPic->bValid == 0)
+                            std::cout << "      - Not marked valid (bValid=0)" << std::endl;
+                        if (pDecPic->iWidth <= 0 || pDecPic->iHeight <= 0)
+                            std::cout << "      - Invalid dimensions: " << pDecPic->iWidth 
+                                      << "x" << pDecPic->iHeight << std::endl;
+                        if (pDecPic->pY == NULL)
+                            std::cout << "      - Y buffer is NULL" << std::endl;
+                    }
+                }
+                else
+                {
+                    std::cout << "    ERROR: pDecPic is NULL" << std::endl;
                 }
             }
         }
-    }
-}
-
-void Avcdec::CaptureSinglePicture(DecodedPicList *pPic)
-{
-    if (!pPic || !pPic->bValid)
-    {
-        return;
-    }
-    
-    if (!pPic->pY)
-    {
-        std::cout << "      ERROR: pY is NULL" << std::endl;
-        return;
-    }
-    
-    // Get available buffer
-    static int buffer_index = 0;
-    PictureBuffer* buffer = &m_pictureBuffers[buffer_index];
-    buffer_index = (buffer_index + 1) % m_bufferCount;
-    
-    int ySize = pPic->iWidth * pPic->iHeight;
-    int uvSize = ySize / 4;
-    
-    // Copy Y plane
-    memcpy(buffer->data, pPic->pY, ySize);
-    
-    // Copy U plane
-    if (pPic->pU)
-        memcpy(buffer->data + ySize, pPic->pU, uvSize);
-    
-    // Copy V plane
-    if (pPic->pV)
-        memcpy(buffer->data + ySize + uvSize, pPic->pV, uvSize);
-    
-    // Queue frame
-    Frame frame;
-    frame.data = buffer->data;
-    frame.width = pPic->iWidth;
-    frame.height = pPic->iHeight;
-    frame.metadata.pic_width = pPic->iWidth;
-    frame.metadata.pic_height = pPic->iHeight;
-    frame.metadata.pic_type = 0;
-    frame.metadata.bit_depth = 8;
-    
-    m_frameQueue.push(frame);
-    
-    std::cout << "      Picture queued! Total: " << m_frameQueue.size() << std::endl;
-}
-
-void Avcdec::CaptureDecodedFrame()
-{
-    // ========== Access pDecOuputPic list directly ==========
-    if (!p_Dec || !p_Dec->p_Vid)
-    {
-        return;
-    }
-    
-    VideoParameters *p_Vid = p_Dec->p_Vid;
-    
-    // pDecOuputPic is a linked list of decoded pictures
-    DecodedPicList *pDecPicList = p_Vid->pDecOuputPic;
-    
-    if (!pDecPicList)
-    {
-        std::cout << "      No pictures in output list" << std::endl;
-        return;
-    }
-    
-    // Iterate through the linked list and capture VALID pictures
-    DecodedPicList *pPic = pDecPicList;
-    int pic_count = 0;
-    
-    while (pPic)
-    {
-        std::cout << pPic->bValid << std::endl;
-        // Only capture pictures marked as valid
-
-        if (pPic->bValid)
+        else
         {
-            pic_count++;
-            
-            std::cout << "      Processing picture " << pic_count 
-                      << ": POC=" << pPic->iPOC 
-                      << " size=" << pPic->iWidth << "x" << pPic->iHeight << std::endl;
-            
-            if (!pPic->pY)
-            {
-                std::cout << "      ERROR: pY is NULL" << std::endl;
-                pPic = pPic->pNext;
-                continue;
-            }
-            
-            // Get available buffer
-            static int buffer_index = 0;
-            PictureBuffer* buffer = &m_pictureBuffers[buffer_index];
-            buffer_index = (buffer_index + 1) % m_bufferCount;
-            
-            // Calculate sizes
-            int ySize = pPic->iWidth * pPic->iHeight;
-            int uvSize = ySize / 4;
-            
-            // Copy Y plane
-            memcpy(buffer->data, pPic->pY, ySize);
-            
-            // Copy U plane
-            if (pPic->pU)
-                memcpy(buffer->data + ySize, pPic->pU, uvSize);
-            
-            // Copy V plane
-            if (pPic->pV)
-                memcpy(buffer->data + ySize + uvSize, pPic->pV, uvSize);
-            
-            // Queue frame
-            Frame frame;
-            frame.data = buffer->data;
-            frame.width = pPic->iWidth;
-            frame.height = pPic->iHeight;
-            frame.metadata.pic_width = pPic->iWidth;
-            frame.metadata.pic_height = pPic->iHeight;
-            frame.metadata.pic_type = 0;
-            frame.metadata.bit_depth = p_Vid->bitdepth_luma;
-            
-            m_frameQueue.push(frame);
-            
-            std::cout << "      Queued picture " << pic_count << std::endl;
+            std::cout << "  Decode error or no more frames. ret=" << ret << std::endl;
+            break;
         }
-        
-        // Move to next in list
-        pPic = pPic->pNext;
     }
     
-    std::cout << "      Processed " << pic_count << " valid pictures from output list" << std::endl;
+    std::cout << "\n  ========== DECODE COMPLETE ==========" << std::endl;
+    std::cout << "  Total frames decoded: " << frame_count << std::endl;
+    std::cout << "  Total pictures retrieved: " << picture_count << std::endl;
+}
+
+void Avcdec::ProcessDecodedPicture(DecodedPicList *pPic)
+{
+    if (!pPic || !pPic->pY)
+    {
+        std::cout << "      ERROR: Invalid picture pointer" << std::endl;
+        return;
+    }
+    
+    std::cout << "    ========== PROCESSING PICTURE ==========" << std::endl;
+    
+    int width = pPic->iWidth;
+    int height = pPic->iHeight;
+    int ySize = width * height;
+    int uvSize = ySize / 4;
+    int totalSize = ySize + 2 * uvSize;
+    
+    std::cout << "      Picture size: " << width << "x" << height << std::endl;
+    std::cout << "      Y plane: " << ySize << " bytes" << std::endl;
+    std::cout << "      U plane: " << uvSize << " bytes" << std::endl;
+    std::cout << "      V plane: " << uvSize << " bytes" << std::endl;
+    std::cout << "      Total: " << totalSize << " bytes" << std::endl;
+    
+    // ========== GET AVAILABLE DISPLAY BUFFER ==========
+    PictureBuffer* buffer = GetAvailableBuffer();
+    if (!buffer)
+    {
+        std::cout << "      ERROR: No available display buffer" << std::endl;
+        return;
+    }
+    
+    std::cout << "      Using display buffer" << std::endl;
+    
+    // ========== COPY YUV DATA TO DISPLAY BUFFER ==========
+    if (pPic->pY)
+    {
+        std::cout << "      Copying Y plane..." << std::endl;
+        memcpy(buffer->data, pPic->pY, ySize);
+    }
+    
+    if (pPic->pU)
+    {
+        std::cout << "      Copying U plane..." << std::endl;
+        memcpy(buffer->data + ySize, pPic->pU, uvSize);
+    }
+    else
+    {
+        std::cout << "      WARNING: U plane is NULL, filling with 128" << std::endl;
+        memset(buffer->data + ySize, 128, uvSize);
+    }
+    
+    if (pPic->pV)
+    {
+        std::cout << "      Copying V plane..." << std::endl;
+        memcpy(buffer->data + ySize + uvSize, pPic->pV, uvSize);
+    }
+    else
+    {
+        std::cout << "      WARNING: V plane is NULL, filling with 128" << std::endl;
+        memset(buffer->data + ySize + uvSize, 128, uvSize);
+    }
+    
+    // ========== UPDATE BUFFER METADATA ==========
+    buffer->width = width;
+    buffer->height = height;
+    buffer->poc = pPic->iPOC;
+    buffer->locked = true;
+    
+    std::cout << "      ✓ Picture data copied to display buffer successfully" << std::endl;
+    std::cout << "      Buffer address: " << (void*)buffer->data << std::endl;
+    
+    // ========== QUEUE FRAME FOR APPLICATION ==========
+    QueueFrameForDisplay(buffer);
+    
+    std::cout << "    ========== END PROCESSING ==========" << std::endl;
 }
 
 bool Avcdec::CheckBufferSpace(UInt32 needed_bytes)
@@ -710,32 +630,52 @@ void Avcdec::HandleEndOfAU()
 
 Avcdec::PictureBuffer* Avcdec::GetAvailableBuffer()
 {
-    std::cout << "    GetAvailableBuffer() called" << std::endl;
-    
-    int available_count = 0;
-    for (int i = 0; i < m_bufferCount; i++)
+    if (!m_pictureBuffers || m_bufferCount == 0)
     {
-        std::cout << "      Buffer " << i << ": locked=" << m_pictureBuffers[i].locked << std::endl;
-        
-        if (!m_pictureBuffers[i].locked)
-        {
-            available_count++;
-        }
+        std::cout << "      ERROR: Picture buffers not allocated" << std::endl;
+        return NULL;
     }
     
-    std::cout << "      Available buffers: " << available_count << "/" << m_bufferCount << std::endl;
-    
-    // Find first unlocked
+    // Find first unlocked buffer
     for (int i = 0; i < m_bufferCount; i++)
     {
         if (!m_pictureBuffers[i].locked)
         {
-            m_pictureBuffers[i].locked = true;
-            std::cout << "      Locking buffer " << i << std::endl;
+            std::cout << "      Using buffer " << i << " (unlocked)" << std::endl;
             return &m_pictureBuffers[i];
         }
     }
     
-    std::cout << "      ERROR: NO AVAILABLE BUFFERS!" << std::endl;
-    return nullptr;
+    // All buffers locked - warning and reuse first one
+    std::cout << "      WARNING: All buffers locked, reusing buffer 0" << std::endl;
+    std::cout << "      Application may not be calling vdec_release_pic_buffer()" << std::endl;
+    
+    // Force clear the first buffer
+    m_pictureBuffers[0].locked = false;
+    return &m_pictureBuffers[0];
+}
+
+void Avcdec::QueueFrameForDisplay(PictureBuffer* buffer)
+{
+    if (!buffer)
+        return;
+    
+    std::cout << "      Queueing frame for application..." << std::endl;
+    
+    QueuedFrame frame;
+    frame.data = buffer->data;
+    frame.width = buffer->width;
+    frame.height = buffer->height;
+    frame.poc = buffer->poc;
+    frame.metadata.pic_width = buffer->width;
+    frame.metadata.pic_height = buffer->height;
+    frame.metadata.pic_type = 0;
+    frame.metadata.bit_depth = 8;
+    
+    {
+        std::lock_guard<std::mutex> lock(m_frameQueueMutex);
+        m_frameQueue.push(frame);
+    }
+    
+    std::cout << "      ✓ Frame queued! Queue size: " << m_frameQueue.size() << std::endl;
 }

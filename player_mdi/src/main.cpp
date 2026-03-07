@@ -20,10 +20,6 @@ int main(int argc, char* argv[])
     param.target_profile = 100;        // High Profile
     param.target_level = 42;           // Level 4.2
 
-    std::cout << "========================================" << std::endl;
-    std::cout << "H.264 Decoder" << std::endl;
-    std::cout << "========================================" << std::endl << std::endl;
-
     // Create decoder
     Avcdec decoder(&param);
 

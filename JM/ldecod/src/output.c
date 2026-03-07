@@ -463,6 +463,7 @@ static void allocate_p_dec_pic(VideoParameters *p_Vid, DecodedPicList *pDecPic, 
 */
 static void write_out_picture(VideoParameters *p_Vid, StorablePicture *p, int p_out)
 {
+  //zzn
   printf(">>> FINAL OUTPUT: frame_num=%d  POC=%d\n",
        p->frame_num,
        p->frame_poc);
@@ -475,23 +476,19 @@ static void write_out_picture(VideoParameters *p_Vid, StorablePicture *p, int p_
 
   int crop_left, crop_right, crop_top, crop_bottom;
   int symbol_size_in_bytes = ((p_Vid->pic_unit_bitsize_on_disk+7) >> 3);
-  int rgb_output =  p_Vid->p_EncodePar[p->layer_id]->rgb_output; //(p_Vid->active_sps->vui_seq_parameters.matrix_coefficients==0);
+  int rgb_output =  p_Vid->p_EncodePar[p->layer_id]->rgb_output;
   unsigned char *buf;
-  //int iPicSizeTab[4] = {2, 3, 4, 6};
   int iLumaSize, iFrameSize;
   int iLumaSizeX, iLumaSizeY;
   int iChromaSizeX, iChromaSizeY;
-
   int ret;
 
   if (p->non_existing)
     return;
 
 #if (ENABLE_OUTPUT_TONEMAPPING)
-  // note: this tone-mapping is working for RGB format only. Sharp
   if (p->seiHasTone_mapping && rgb_output)
   {
-    //printf("output frame %d with tone model id %d\n",  p->frame_num, p->tone_mapping_model_id);
     symbol_size_in_bytes = (p->tonemapped_bit_depth>8)? 2 : 1;
     tone_map(p->imgY, p->tone_mapping_lut, p->size_x, p->size_y);
     tone_map(p->imgUV[0], p->tone_mapping_lut, p->size_x_cr, p->size_y_cr);
@@ -499,7 +496,7 @@ static void write_out_picture(VideoParameters *p_Vid, StorablePicture *p, int p_
   }
 #endif
 
-  // should this be done only once?
+  // ========== STEP 1: CALCULATE CROP DIMENSIONS ==========
   if (p->frame_cropping_flag)
   {
     crop_left   = SubWidthC [p->chroma_format_idc] * p->frame_crop_left_offset;
@@ -511,31 +508,30 @@ static void write_out_picture(VideoParameters *p_Vid, StorablePicture *p, int p_
   {
     crop_left = crop_right = crop_top = crop_bottom = 0;
   }
-  iChromaSizeX =  p->size_x_cr- p->frame_crop_left_offset -p->frame_crop_right_offset;
-  iChromaSizeY = p->size_y_cr - ( 2 - p->frame_mbs_only_flag ) * p->frame_crop_top_offset -( 2 - p->frame_mbs_only_flag ) * p->frame_crop_bottom_offset;
-  iLumaSizeX = p->size_x - crop_left-crop_right;
+
+  iChromaSizeX =  p->size_x_cr - p->frame_crop_left_offset - p->frame_crop_right_offset;
+  iChromaSizeY = p->size_y_cr - ( 2 - p->frame_mbs_only_flag ) * p->frame_crop_top_offset 
+                             - ( 2 - p->frame_mbs_only_flag ) * p->frame_crop_bottom_offset;
+  iLumaSizeX = p->size_x - crop_left - crop_right;
   iLumaSizeY = p->size_y - crop_top - crop_bottom;
   iLumaSize  = iLumaSizeX * iLumaSizeY * symbol_size_in_bytes;
-  iFrameSize = (iLumaSizeX * iLumaSizeY + 2 * (iChromaSizeX * iChromaSizeY)) * symbol_size_in_bytes; //iLumaSize*iPicSizeTab[p->chroma_format_idc]/2;
+  iFrameSize = (iLumaSizeX * iLumaSizeY + 2 * (iChromaSizeX * iChromaSizeY)) * symbol_size_in_bytes;
 
-  //printf ("write frame size: %dx%d\n", p->size_x-crop_left-crop_right,p->size_y-crop_top-crop_bottom );
+  printf("  Image: %dx%d (cropped: %dx%d), Chroma: %dx%d\n",
+         p->size_x, p->size_y, iLumaSizeX, iLumaSizeY,
+         iChromaSizeX, iChromaSizeY);
 
-  // We need to further cleanup this function
-  if (p_out == -1)
-    return;
-
-
-
-  // KS: this buffer should actually be allocated only once, but this is still much faster than the previous version
+  // ========== STEP 2: GET AND ALLOCATE pDecPic BUFFER ==========
   pDecPic = get_one_avail_dec_pic_from_list(p_Vid->pDecOuputPic, 0, 0);
-  if( (pDecPic->pY == NULL)
-    || (pDecPic->iBufSize < iFrameSize)
-    )
-    allocate_p_dec_pic(p_Vid, pDecPic, p, iLumaSize, iFrameSize, iLumaSizeX, iLumaSizeY, iChromaSizeX, iChromaSizeY);
+  
+  if( (pDecPic->pY == NULL) || (pDecPic->iBufSize < iFrameSize) )
+    allocate_p_dec_pic(p_Vid, pDecPic, p, iLumaSize, iFrameSize, 
+                       iLumaSizeX, iLumaSizeY, iChromaSizeX, iChromaSizeY);
+
 #if (MVC_EXTENSION_ENABLE)
   {
     pDecPic->bValid = 1;
-    pDecPic->iViewId = p->view_id >=0 ? p->view_id : -1;
+    pDecPic->iViewId = p->view_id >= 0 ? p->view_id : -1;
   }
 #else
   pDecPic->bValid = 1;
@@ -543,12 +539,45 @@ static void write_out_picture(VideoParameters *p_Vid, StorablePicture *p, int p_
   
   pDecPic->iPOC = p->frame_poc;
   
-  if (NULL==pDecPic->pY)
+  if (NULL == pDecPic->pY)
   {
     no_mem_exit("write_out_picture: buf");
   }
 
+  printf("  pDecPic allocated: Y=%p U=%p V=%p Size=%d bytes\n",
+         pDecPic->pY, pDecPic->pU, pDecPic->pV, pDecPic->iBufSize);
+
+  // ========== STEP 3: COPY YUV DATA FROM StorablePicture TO pDecPic ==========
+  printf("  Copying YUV data to pDecPic: %dx%d -> Y=%p U=%p V=%p\n",
+         iLumaSizeX, iLumaSizeY, pDecPic->pY, pDecPic->pU, pDecPic->pV);
+
+  // Copy Y plane
+  buf = pDecPic->pY;
+  p_Vid->img2buf(p->imgY, buf, p->size_x, p->size_y, symbol_size_in_bytes, 
+                 crop_left, crop_right, crop_top, crop_bottom, pDecPic->iYBufStride);
+
+  // Copy U plane
+  buf = pDecPic->pU;
+  p_Vid->img2buf(p->imgUV[0], buf, p->size_x_cr, p->size_y_cr, symbol_size_in_bytes, 
+                 crop_left, crop_right, crop_top, crop_bottom, pDecPic->iUVBufStride);
+
+  // Copy V plane
+  buf = pDecPic->pV;
+  p_Vid->img2buf(p->imgUV[1], buf, p->size_x_cr, p->size_y_cr, symbol_size_in_bytes, 
+                 crop_left, crop_right, crop_top, crop_bottom, pDecPic->iUVBufStride);
+
+  printf("  YUV data copied successfully\n");
+  printf("  pDecPic ready: iWidth=%d iHeight=%d iPOC=%d bValid=%d\n",
+         pDecPic->iWidth, pDecPic->iHeight, pDecPic->iPOC, pDecPic->bValid);
+
+  // ========== STEP 4: RETURN IF MEMORY MODE (no file output) ==========
+  if (p_out == -1)
+  {
+    printf("  Memory mode: returning without file output\n");
+    return;
+  }
   
+  // file mode
   if(rgb_output)
   {
     buf = malloc (p->size_x * p->size_y * symbol_size_in_bytes);
