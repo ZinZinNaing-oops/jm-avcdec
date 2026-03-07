@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstdio>
+#include <mutex>
 
 //============================================================================
 // JM External Functions and Variables
@@ -25,12 +26,11 @@ extern "C" {
     
     // JM structures
     extern DecoderParams *p_Dec;
-    extern DecodedPicList *pDecPicList;
     
     // JM functions
     extern int OpenDecoder(InputParameters *p_Inp);
-    extern int DecodeOneFrame(DecoderParams *pDecoder);
-    extern void FinitDecoder(DecodedPicList **pDecPicList);
+    extern int DecodeOneFrame(DecodedPicList **ppDecPicList);
+    extern int FinitDecoder(DecodedPicList **ppDecPicList);
     extern int CloseDecoder(void);
 }
 
@@ -451,80 +451,74 @@ void Avcdec::DecodeBuffer()
     
     std::cout << "  Starting decode loop..." << std::endl;
     
-    while (true)
+    DecodedPicList *pDecPicList = nullptr;
+    int ret;
+    
+    // Decode loop - mirrors file mode: process pictures after each frame including EOS
+    do
     {
-        int ret = DecodeOneFrame(p_Dec);
+        ret = DecodeOneFrame(&pDecPicList);
         
-        if (ret == DEC_EOS)
-        {
-            std::cout << "  ========== END OF STREAM ==========" << std::endl;
-            break;
-        }
-        
-        if (ret == DEC_SUCCEED)
+        if (ret == DEC_EOS || ret == DEC_SUCCEED)
         {
             frame_count++;
             std::cout << "\n  ===== Frame " << frame_count << " Decoded =====" << std::endl;
             
-            // ========== RETRIEVE DECODED PICTURE ==========
-            if (p_Dec->p_Vid)
+            // Traverse the decoded picture linked list and process all valid pictures
+            if (pDecPicList != nullptr)
             {
-                VideoParameters *p_Vid = p_Dec->p_Vid;
-                
-                // Get the head of the decoded picture list
-                DecodedPicList *pDecPic = p_Vid->pDecOuputPic;
-                
-                if (pDecPic)
+                for (DecodedPicList *pPic = pDecPicList; pPic != nullptr; pPic = pPic->pNext)
                 {
-                    std::cout << "    pDecPic found: iWidth=" << pDecPic->iWidth 
-                              << " iHeight=" << pDecPic->iHeight 
-                              << " POC=" << pDecPic->iPOC 
-                              << " bValid=" << pDecPic->bValid << std::endl;
-                    
-                    // ========== VALIDATE PICTURE ==========
-                    if (pDecPic->bValid == 1 && 
-                        pDecPic->iWidth > 0 && 
-                        pDecPic->iHeight > 0 && 
-                        pDecPic->pY != NULL)
+                    if (pPic->bValid == 1 &&
+                        pPic->iWidth > 0 &&
+                        pPic->iHeight > 0 &&
+                        pPic->pY != nullptr)
                     {
                         std::cout << "    ✓ Picture is VALID and READY" << std::endl;
-                        std::cout << "      Width:  " << pDecPic->iWidth << std::endl;
-                        std::cout << "      Height: " << pDecPic->iHeight << std::endl;
-                        std::cout << "      Y buffer: " << (void*)pDecPic->pY << std::endl;
-                        std::cout << "      U buffer: " << (void*)pDecPic->pU << std::endl;
-                        std::cout << "      V buffer: " << (void*)pDecPic->pV << std::endl;
+                        std::cout << "      Width:  " << pPic->iWidth << std::endl;
+                        std::cout << "      Height: " << pPic->iHeight << std::endl;
+                        std::cout << "      POC:    " << pPic->iPOC << std::endl;
                         
-                        // ========== PROCESS THE PICTURE ==========
-                        ProcessDecodedPicture(pDecPic);
+                        ProcessDecodedPicture(pPic);
                         picture_count++;
                         
                         // Mark picture as consumed
-                        pDecPic->bValid = 0;
-                        
-                        std::cout << "    Picture marked as consumed" << std::endl;
+                        pPic->bValid = 0;
                     }
-                    else
-                    {
-                        std::cout << "    ✗ Picture NOT valid" << std::endl;
-                        if (pDecPic->bValid == 0)
-                            std::cout << "      - Not marked valid (bValid=0)" << std::endl;
-                        if (pDecPic->iWidth <= 0 || pDecPic->iHeight <= 0)
-                            std::cout << "      - Invalid dimensions: " << pDecPic->iWidth 
-                                      << "x" << pDecPic->iHeight << std::endl;
-                        if (pDecPic->pY == NULL)
-                            std::cout << "      - Y buffer is NULL" << std::endl;
-                    }
-                }
-                else
-                {
-                    std::cout << "    ERROR: pDecPic is NULL" << std::endl;
                 }
             }
         }
         else
         {
-            std::cout << "  Decode error or no more frames. ret=" << ret << std::endl;
+            std::cout << "  Decode error. ret=" << ret << std::endl;
             break;
+        }
+    } while (ret == DEC_SUCCEED);
+    
+    // Flush the DPB: FinitDecoder outputs all remaining buffered pictures
+    std::cout << "  ========== END OF STREAM - Flushing DPB ==========" << std::endl;
+    FinitDecoder(&pDecPicList);
+    
+    // Process all remaining valid pictures from the flushed DPB
+    if (pDecPicList != nullptr)
+    {
+        for (DecodedPicList *pPic = pDecPicList; pPic != nullptr; pPic = pPic->pNext)
+        {
+            if (pPic->bValid == 1 &&
+                pPic->iWidth > 0 &&
+                pPic->iHeight > 0 &&
+                pPic->pY != nullptr)
+            {
+                std::cout << "    ✓ Flushed Picture VALID and READY" << std::endl;
+                std::cout << "      Width:  " << pPic->iWidth << std::endl;
+                std::cout << "      Height: " << pPic->iHeight << std::endl;
+                std::cout << "      POC:    " << pPic->iPOC << std::endl;
+                
+                ProcessDecodedPicture(pPic);
+                picture_count++;
+                
+                pPic->bValid = 0;
+            }
         }
     }
     

@@ -8,6 +8,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Disable narrowing warning for JM compatibility
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     add_compile_options(-Wno-c++11-narrowing)
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    add_compile_options(-Wno-narrowing)
 endif()
 
 add_subdirectory(JM)
