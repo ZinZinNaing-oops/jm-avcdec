@@ -4,6 +4,7 @@
 #include <queue>
 #include <iostream>
 #include <cstring>
+#include <mutex>
 
 // Forward Declarations
 extern "C" {
