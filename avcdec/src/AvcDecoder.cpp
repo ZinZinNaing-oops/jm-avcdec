@@ -46,7 +46,6 @@ Avcdec::Avcdec(DECPARAM_AVC *INPUT_PARAM)
       m_streamCapacity(0),
       m_streamSize(0),
       m_started(false),
-      m_finished(false),
       m_postprocess_enabled(false)
 {
     std::cout << "Avcdec created" << std::endl;
@@ -126,13 +125,14 @@ Avcdec::~Avcdec()
 //============================================================================
 // vdec_start() - Start decoding
 //============================================================================
-
 void Avcdec::vdec_start(UInt16 PLAY_MODE, UInt16 POST_PROCESS)
 {
     std::cout << "vdec_start()" << std::endl;
     
+    if(m_started)
+        return;
+
     m_started = true;
-    m_finished = false;
     m_postprocess_enabled = (POST_PROCESS != 0);
     
     // Setup memory mode globals for JM
@@ -143,21 +143,19 @@ void Avcdec::vdec_start(UInt16 PLAY_MODE, UInt16 POST_PROCESS)
 }
 
 //============================================================================
-// 5.2.4 vdec_stop() - Stop decoding
+// vdec_stop() - Stop decoding
 //============================================================================
-
 int Avcdec::vdec_stop()
 {
     std::cout << "vdec_stop()" << std::endl;
     
     m_started = false;
-    m_finished = true;
     
     return 0;
 }
 
 //============================================================================
-// 5.2.5 vdec_postprocess() - Set post-processing
+// vdec_postprocess() - Set post-processing
 //============================================================================
 
 void Avcdec::vdec_postprocess(UInt16 TYPE)
@@ -264,7 +262,7 @@ unsigned int Avcdec::vdec_get_status(
     UInt16 dec_status = 0;
     
     // Set status flags
-    if (m_started && !m_finished)
+    if (m_started)
         dec_status |= (1 << 6);  // Decoding in progress
     
     *DEC_STATUS = dec_status;
@@ -292,7 +290,7 @@ void Avcdec::vdec_release_pic_buffer(Byte* PIC_ADDR)
     if (!PIC_ADDR)
         return;
     
-    std::cout << "  vdec_release_pic_buffer(): Releasing buffer " << (void*)PIC_ADDR << std::endl;
+    //std::cout << "  vdec_release_pic_buffer(): Releasing buffer " << (void*)PIC_ADDR << std::endl;
     
     // Mark buffer as available
     for (int i = 0; i < m_bufferCount; i++)
@@ -300,7 +298,7 @@ void Avcdec::vdec_release_pic_buffer(Byte* PIC_ADDR)
         if (m_pictureBuffers[i].data == PIC_ADDR)
         {
             m_pictureBuffers[i].locked = false;
-            std::cout << "    ✓ Buffer " << i << " marked as available" << std::endl;
+            //std::cout << "    ✓ Buffer " << i << " marked as available" << std::endl;
             return;
         }
     }

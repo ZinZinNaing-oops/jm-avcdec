@@ -169,7 +169,6 @@ private:
     
     // Decoder state
     bool m_started;
-    bool m_finished;
     bool m_postprocess_enabled;
     
     // Output frame storage

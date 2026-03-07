@@ -15,7 +15,6 @@
 #include "annexb.h"
 #include "memalloc.h" 
 #include "fast_memory.h"
-#include "../../jm_wrapper.h"
 
 static const int IOBUFFERSIZE = 512*1024; //65536;
 
@@ -25,14 +24,6 @@ unsigned char* g_memory_buffer = NULL;  //What JM reads from , Points to m_strea
 int g_memory_size = 0;  //How much JM can read , Same as m_streamSize
 int g_memory_pos = 0;  //Where JM is reading
 int g_memory_mode = 0;  // 0=file mode, 1=memory mode
-
-//zzn
-void jm_set_input_buffer(unsigned char* data, int size)
-{
-    g_memory_buffer = data;
-    g_memory_size = size;
-    g_memory_pos = 0;
-}
 
 void malloc_annex_b(VideoParameters *p_Vid, ANNEXB_t **p_annex_b)
 {

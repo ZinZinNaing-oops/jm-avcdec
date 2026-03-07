@@ -32,9 +32,6 @@ typedef struct annex_b_struct
   byte *Buf;  
 } ANNEXB_t;
 
-//zzn
-void jm_set_input_buffer(unsigned char* data, int size);
-
 extern int  get_annex_b_NALU (VideoParameters *p_Vid, NALU_t *nalu, ANNEXB_t *annex_b);
 
 extern void open_annex_b     (char *fn, ANNEXB_t *annex_b);

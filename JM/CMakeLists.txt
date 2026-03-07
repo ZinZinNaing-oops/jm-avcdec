@@ -9,7 +9,6 @@ list(REMOVE_ITEM JM_LDECOD_SRC
 add_library(jmdec STATIC
     ${JM_LDECOD_SRC}
     ${JM_LCOMMON_SRC}
-    jm_wrapper.c
 )
 
 target_include_directories(jmdec PUBLIC
