@@ -72,7 +72,6 @@ int main(int argc, char* argv[])
 
     file.close();
     std::cout << std::endl;
-
     // Get decoded pictures
     std::cout << "Retrieved pictures:" << std::endl;
     int pic_count = 0;
